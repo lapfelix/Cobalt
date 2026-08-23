@@ -569,7 +569,9 @@ impl PretNumerique {
     }
 
     fn start_jobs(&mut self, context: &mut Context) {
-        if self.inflight.is_some() || self.job_ids.is_empty() {
+        // The server owns the durable queue. Fetch it even on a fresh install
+        // where the local UI-state store has no remembered job IDs yet.
+        if self.inflight.is_some() {
             self.loading = false;
             self.show(context);
             return;
