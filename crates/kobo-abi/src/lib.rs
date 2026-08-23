@@ -937,6 +937,22 @@ pub mod process_group {
 
     /// Makes `command` the leader of a new process group before exec.
     pub fn configure(command: &mut Command) {
+        #[cfg(target_os = "linux")]
+        // Do this in the child instead of asking `posix_spawn` for a process
+        // group. The libc shipped by older Kobo firmware rejects that spawn
+        // attribute with EINVAL, before the application has a chance to exec.
+        // `setpgid` is async-signal-safe and is the operation the attribute
+        // would have performed for us.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
         command.process_group(0);
     }
 
