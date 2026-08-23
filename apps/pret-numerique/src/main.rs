@@ -719,7 +719,10 @@ impl PretNumerique {
     }
 
     fn schedule_queue_poll(&mut self, context: &mut Context) {
-        if self.sleep_task.is_none() && self.inflight.is_none() && !self.job_ids.is_empty() {
+        if self.sleep_task.is_none()
+            && self.inflight.is_none()
+            && self.jobs.iter().any(|job| is_active_state(&job.state))
+        {
             self.sleep_task = context.spawn(Task::Sleep { seconds: 2 });
         }
     }
