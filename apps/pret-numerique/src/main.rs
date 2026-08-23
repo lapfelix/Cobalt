@@ -82,11 +82,15 @@ struct Source {
     available: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SearchResult {
     title: String,
     authors: Vec<String>,
     isbn: Option<String>,
+    description: Option<String>,
+    goodreads_rating: Option<f64>,
+    goodreads_ratings_count: Option<i64>,
+    goodreads_reviews_count: Option<i64>,
     sources: Vec<Source>,
 }
 
@@ -282,11 +286,15 @@ impl PretNumerique {
                     "Not currently available"
                 };
                 let isbn = result.isbn.as_deref().unwrap_or("ISBN not listed");
+                let goodreads = result
+                    .goodreads_rating
+                    .map(|rating| format!(" · Goodreads {rating:.1}/5"))
+                    .unwrap_or_default();
                 (
                     format!("result.{index}"),
                     result.title.clone(),
                     format!(
-                        "{} · ISBN: {isbn} · {catalogs} · {availability}",
+                        "{} · ISBN: {isbn} · {catalogs} · {availability}{goodreads}",
                         author_line(&result.authors),
                     ),
                     Glyph::Book,
@@ -317,8 +325,28 @@ impl PretNumerique {
                         .clone()
                         .unwrap_or_else(|| "Not listed".to_owned()),
                 ),
-            ])
-            .section("Choose a library");
+            ]);
+        if let Some(description) = &result.description {
+            screen = screen.section("About this book").text(description.clone());
+        }
+        if let Some(rating) = result.goodreads_rating {
+            screen = screen.section("Goodreads").facts([
+                ("Score", format!("{rating:.1} / 5")),
+                (
+                    "Ratings",
+                    result
+                        .goodreads_ratings_count
+                        .map_or_else(|| "Not listed".to_owned(), count_label),
+                ),
+                (
+                    "Reviews",
+                    result
+                        .goodreads_reviews_count
+                        .map_or_else(|| "Not listed".to_owned(), count_label),
+                ),
+            ]);
+        }
+        screen = screen.section("Choose a library");
         screen = screen.rows(
             result
                 .sources
@@ -1035,6 +1063,18 @@ fn compact_message(message: &str, limit: usize) -> String {
     compact
 }
 
+fn count_label(value: i64) -> String {
+    let digits = value.max(0).to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+    grouped
+}
+
 fn catalog_label(catalog: &str) -> &'static str {
     match catalog {
         "montreal" => "Montréal",
@@ -1163,6 +1203,17 @@ fn parse_search(body: &[u8]) -> Option<Vec<SearchResult>> {
                         .get("isbn")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
+                    description: result
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(|value| compact_message(value, 720)),
+                    goodreads_rating: result.get("goodreads_rating").and_then(Value::as_f64),
+                    goodreads_ratings_count: result
+                        .get("goodreads_ratings_count")
+                        .and_then(Value::as_i64),
+                    goodreads_reviews_count: result
+                        .get("goodreads_reviews_count")
+                        .and_then(Value::as_i64),
                     sources,
                 })
             })
@@ -1315,6 +1366,28 @@ mod tests {
     }
 
     #[test]
+    fn detail_screen_shows_description_and_goodreads_counts() {
+        let result = parse_search(
+            br#"{"results":[{"title":"Book","authors":["Author"],"isbn":"9780000000000","description":"A bounded description.","goodreads_rating":4.29,"goodreads_ratings_count":1700633,"goodreads_reviews_count":88668,"sources":[{"handle":"opaque","catalog":"banq","catalog_name":"BAnQ","availability":"available","is_available":true}]}]}"#,
+        )
+        .expect("valid search response")
+        .remove(0);
+        let screen = format!(
+            "{:?}",
+            PretNumerique {
+                results: vec![result],
+                selected_result: Some(0),
+                ..PretNumerique::default()
+            }
+            .detail_screen()
+        );
+        assert!(screen.contains("A bounded description."));
+        assert!(screen.contains("4.3 / 5"));
+        assert!(screen.contains("1,700,633"));
+        assert!(screen.contains("88,668"));
+    }
+
+    #[test]
     fn search_status_explains_a_partial_catalog_authentication_failure() {
         let note = parse_catalog_status_note(
             br#"{"catalogs":[{"catalog":"montreal","state":"auth_required"},{"catalog":"banq","state":"ready"}]}"#,
@@ -1423,6 +1496,10 @@ mod tests {
             title: "Fixture title".to_owned(),
             authors: vec!["Fixture author".to_owned()],
             isbn: Some("9780000000000".to_owned()),
+            description: None,
+            goodreads_rating: None,
+            goodreads_ratings_count: None,
+            goodreads_reviews_count: None,
             sources: vec![Source {
                 handle: "opaque-handle".to_owned(),
                 catalog: "montreal".to_owned(),
