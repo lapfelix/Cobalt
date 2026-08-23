@@ -765,7 +765,13 @@ pub mod sandbox {
                 return Err(sandbox_error("prctl no-new-privs"));
             }
             if install_filter().is_err() && libc::unshare(libc::CLONE_NEWNET) < 0 {
-                return Err(sandbox_error("unshare network namespace"));
+                let error = io::Error::last_os_error();
+                if !legacy_isolation_unavailable(&error) {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("unshare network namespace: {error}"),
+                    ));
+                }
             }
             if libc::setgroups(0, std::ptr::null()) < 0 {
                 return Err(sandbox_error("setgroups"));
@@ -784,6 +790,18 @@ pub mod sandbox {
     fn sandbox_error(step: &str) -> io::Error {
         let error = io::Error::last_os_error();
         io::Error::new(error.kind(), format!("{step}: {error}"))
+    }
+
+    /// Linux 4.1 Kobo builds predate seccomp and may compile out network
+    /// namespaces too. The chroot, unprivileged identity, private process
+    /// group and `/proc` sweep remain available on those readers; an actual
+    /// refusal from a supported isolation mechanism still fails closed.
+    #[cfg(target_os = "linux")]
+    fn legacy_isolation_unavailable(error: &io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(code) if code == libc::EINVAL || code == libc::ENOSYS
+        )
     }
 
     /// Whether the current process has the privilege required to prepare and
@@ -922,6 +940,24 @@ pub mod sandbox {
             Ok(0)
         }
     }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod tests {
+        use std::io;
+
+        #[test]
+        fn legacy_kernel_absence_is_distinct_from_an_isolation_refusal() {
+            assert!(super::legacy_isolation_unavailable(
+                &io::Error::from_raw_os_error(libc::EINVAL)
+            ));
+            assert!(super::legacy_isolation_unavailable(
+                &io::Error::from_raw_os_error(libc::ENOSYS)
+            ));
+            assert!(!super::legacy_isolation_unavailable(
+                &io::Error::from_raw_os_error(libc::EPERM)
+            ));
+        }
+    }
 }
 
 /// Signals a child-owned process group rather than only its leader.
@@ -937,22 +973,6 @@ pub mod process_group {
 
     /// Makes `command` the leader of a new process group before exec.
     pub fn configure(command: &mut Command) {
-        #[cfg(target_os = "linux")]
-        // Do this in the child instead of asking `posix_spawn` for a process
-        // group. The libc shipped by older Kobo firmware rejects that spawn
-        // attribute with EINVAL, before the application has a chance to exec.
-        // `setpgid` is async-signal-safe and is the operation the attribute
-        // would have performed for us.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setpgid(0, 0) < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
-        }
-        #[cfg(not(target_os = "linux"))]
         command.process_group(0);
     }
 
