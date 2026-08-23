@@ -1256,9 +1256,9 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         availability_label, kind_label, parse_books, parse_job, parse_search, state_label, Book,
-        PretNumerique, Source,
+        PretNumerique, SearchResult, Source, View, API, CONFIRM_BORROW, CONFIRM_RETURN,
     };
-    use kobo_sdk::{Context, KoboApp, StoreResult};
+    use kobo_sdk::{action_id, AppRunner, Command, Context, KoboApp, StoreResult, Task};
 
     #[test]
     fn search_parser_keeps_opaque_handles_and_library_sources() {
@@ -1330,6 +1330,87 @@ mod tests {
         assert!(confirmation.contains("BAnQ"));
         app.filter = super::CatalogFilter::Montreal;
         assert!(!format!("{:?}", app.library_screen()).contains("Fixture loan"));
+    }
+
+    #[test]
+    fn borrow_and_return_actions_only_post_to_the_proxy() {
+        let result = SearchResult {
+            title: "Fixture title".to_owned(),
+            authors: vec!["Fixture author".to_owned()],
+            isbn: Some("9780000000000".to_owned()),
+            sources: vec![Source {
+                handle: "opaque-handle".to_owned(),
+                catalog: "montreal".to_owned(),
+                catalog_name: "Montréal".to_owned(),
+                availability: "available".to_owned(),
+                available: true,
+            }],
+        };
+        let mut borrow = AppRunner::new(PretNumerique {
+            results: vec![result],
+            selected_result: Some(0),
+            ..PretNumerique::default()
+        });
+        borrow.start();
+        borrow.action(action_id("source.0"));
+        assert_eq!(borrow.app().view, View::ConfirmBorrow);
+        let borrow_command = borrow
+            .action(action_id(CONFIRM_BORROW))
+            .into_iter()
+            .find_map(|command| match command {
+                Command::Spawn {
+                    work:
+                        Task::Post {
+                            url,
+                            body,
+                            content_type: _,
+                            credential: _,
+                            headers: _,
+                            max_bytes: _,
+                        },
+                    ..
+                } => Some((url, body)),
+                _ => None,
+            })
+            .expect("borrow should post a proxy job");
+        assert_eq!(borrow_command.0, format!("{API}/jobs"));
+        assert!(borrow_command.1.contains("opaque-handle"));
+        assert!(!borrow_command.1.contains("https://"));
+
+        let mut returning = AppRunner::new(PretNumerique {
+            view: View::Library,
+            books: vec![Book {
+                id: "book-id".to_owned(),
+                title: "Fixture loan".to_owned(),
+                catalog: "banq".to_owned(),
+                file_name: "Fixture.lcpl".to_owned(),
+                return_state: None,
+            }],
+            ..PretNumerique::default()
+        });
+        returning.start();
+        returning.action(action_id("book.0"));
+        assert_eq!(returning.app().view, View::ConfirmReturn);
+        let return_url = returning
+            .action(action_id(CONFIRM_RETURN))
+            .into_iter()
+            .find_map(|command| match command {
+                Command::Spawn {
+                    work:
+                        Task::Post {
+                            url,
+                            body: _,
+                            content_type: _,
+                            credential: _,
+                            headers: _,
+                            max_bytes: _,
+                        },
+                    ..
+                } => Some(url),
+                _ => None,
+            })
+            .expect("return should post to the proxy");
+        assert_eq!(return_url, format!("{API}/books/book-id/return"));
     }
 
     #[test]
