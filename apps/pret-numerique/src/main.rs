@@ -1255,7 +1255,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_label, kind_label, parse_books, parse_job, parse_search, state_label,
+        availability_label, kind_label, parse_books, parse_job, parse_search, state_label, Book,
         PretNumerique, Source,
     };
     use kobo_sdk::{Context, KoboApp, StoreResult};
@@ -1306,6 +1306,30 @@ mod tests {
             }),
             "Available now"
         );
+    }
+
+    #[test]
+    fn library_view_keeps_both_catalogues_and_return_confirmation_visible() {
+        let mut app = PretNumerique {
+            books: vec![Book {
+                id: "book-id".to_owned(),
+                title: "Fixture loan".to_owned(),
+                catalog: "banq".to_owned(),
+                file_name: "Fixture.lcpl".to_owned(),
+                return_state: None,
+            }],
+            selected_book: Some(0),
+            ..PretNumerique::default()
+        };
+        let library = format!("{:?}", app.library_screen());
+        assert!(library.contains("Montréal"));
+        assert!(library.contains("BAnQ"));
+        assert!(library.contains("Fixture loan"));
+        let confirmation = format!("{:?}", app.confirm_return_screen());
+        assert!(confirmation.contains("Return this loan?"));
+        assert!(confirmation.contains("BAnQ"));
+        app.filter = super::CatalogFilter::Montreal;
+        assert!(!format!("{:?}", app.library_screen()).contains("Fixture loan"));
     }
 
     #[test]
