@@ -41,6 +41,6 @@ evidence is recorded from the physical probe. The profile is write-ready only
 for this exact N506 identity and firmware; install the package and run the app
 smoke tests on the Clara 2E.
 
-The Prêt numérique app itself remains safe to develop without this profile:
-its network/UI code can be checked in the host workspace, but no device
-package or framebuffer write is treated as Clara 2E-ready by this checkout.
+The Prêt numérique package is therefore permitted to write on this measured
+reader. The package still performs no publication download: it only talks to
+the server-side proxy and persists UI state and job IDs on the Kobo.

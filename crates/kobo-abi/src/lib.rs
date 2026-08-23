@@ -753,25 +753,37 @@ pub mod sandbox {
         #[cfg(target_os = "linux")]
         pub unsafe fn enter(&self) -> io::Result<()> {
             if libc::setpgid(0, 0) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(sandbox_error("setpgid"));
             }
-            if libc::chroot(self.root.as_ptr()) < 0 || libc::chdir(c"/".as_ptr()) < 0 {
-                return Err(io::Error::last_os_error());
+            if libc::chroot(self.root.as_ptr()) < 0 {
+                return Err(sandbox_error("chroot"));
+            }
+            if libc::chdir(c"/".as_ptr()) < 0 {
+                return Err(sandbox_error("chdir"));
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(sandbox_error("prctl no-new-privs"));
             }
             if install_filter().is_err() && libc::unshare(libc::CLONE_NEWNET) < 0 {
-                return Err(io::Error::last_os_error());
+                return Err(sandbox_error("unshare network namespace"));
             }
-            if libc::setgroups(0, std::ptr::null()) < 0
-                || libc::setgid(UNPRIVILEGED_ID) < 0
-                || libc::setuid(UNPRIVILEGED_ID) < 0
-            {
-                return Err(io::Error::last_os_error());
+            if libc::setgroups(0, std::ptr::null()) < 0 {
+                return Err(sandbox_error("setgroups"));
+            }
+            if libc::setgid(UNPRIVILEGED_ID) < 0 {
+                return Err(sandbox_error("setgid"));
+            }
+            if libc::setuid(UNPRIVILEGED_ID) < 0 {
+                return Err(sandbox_error("setuid"));
             }
             Ok(())
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sandbox_error(step: &str) -> io::Error {
+        let error = io::Error::last_os_error();
+        io::Error::new(error.kind(), format!("{step}: {error}"))
     }
 
     /// Whether the current process has the privilege required to prepare and
