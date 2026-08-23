@@ -732,7 +732,7 @@ impl PretNumerique {
                 Some(results) => {
                     self.results = results.into_iter().take(MAX_RESULTS).collect();
                     self.loading = false;
-                    self.note = None;
+                    self.note = parse_catalog_status_note(body);
                 }
                 None => {
                     self.loading = false;
@@ -1170,6 +1170,39 @@ fn parse_search(body: &[u8]) -> Option<Vec<SearchResult>> {
     )
 }
 
+fn parse_catalog_status_note(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let root = kobo_json::parse(text).ok()?;
+    let statuses = root.get("catalogs")?.as_array()?;
+    let messages = statuses
+        .iter()
+        .filter_map(|status| {
+            let catalog = status.get("catalog").and_then(Value::as_str)?;
+            let state = status.get("state").and_then(Value::as_str)?;
+            match state {
+                "auth_required" => Some(format!(
+                    "{} needs authentication on the proxy.",
+                    catalog_label(catalog)
+                )),
+                "error" => {
+                    let detail = status
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(|message| compact_message(message, 120))
+                        .filter(|message| !message.is_empty())
+                        .unwrap_or_else(|| "try again later".to_owned());
+                    Some(format!(
+                        "{} could not be searched: {detail}",
+                        catalog_label(catalog)
+                    ))
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    (!messages.is_empty()).then(|| messages.join(" "))
+}
+
 fn parse_books(body: &[u8]) -> Option<Vec<Book>> {
     let text = std::str::from_utf8(body).ok()?;
     let root = kobo_json::parse(text).ok()?;
@@ -1265,9 +1298,9 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_label, compact_message, is_active_state, kind_label, parse_books, parse_job,
-        parse_search, state_label, Book, Job, PretNumerique, SearchResult, Source, View, API,
-        CONFIRM_BORROW, CONFIRM_RETURN,
+        availability_label, compact_message, is_active_state, kind_label, parse_books,
+        parse_catalog_status_note, parse_job, parse_search, state_label, Book, Job, PretNumerique,
+        SearchResult, Source, View, API, CONFIRM_BORROW, CONFIRM_RETURN,
     };
     use kobo_sdk::{action_id, AppRunner, Command, Context, KoboApp, StoreResult, Task};
 
@@ -1279,6 +1312,15 @@ mod tests {
         .expect("valid search response");
         assert_eq!(results[0].sources[0].handle, "opaque");
         assert_eq!(results[0].sources[0].catalog, "banq");
+    }
+
+    #[test]
+    fn search_status_explains_a_partial_catalog_authentication_failure() {
+        let note = parse_catalog_status_note(
+            br#"{"catalogs":[{"catalog":"montreal","state":"auth_required"},{"catalog":"banq","state":"ready"}]}"#,
+        )
+        .expect("an authentication status should produce a note");
+        assert_eq!(note, "Montréal needs authentication on the proxy.");
     }
 
     #[test]
