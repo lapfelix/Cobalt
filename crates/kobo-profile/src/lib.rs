@@ -109,8 +109,9 @@ pub const ELIPSA_2E_389: DeviceProfile = DeviceProfile {
 /// Read-only profile measured on the Prêt numérique Clara 2E.
 ///
 /// The identity and geometry come from `kobo doctor` on the physical N506.
-/// `write_ready` stays false until owner-attended display, touch, exit, and
-/// recovery evidence has been completed on this same reader.
+/// All owner-attended display, touch, recovery, and handoff evidence is now
+/// complete; `write_ready` stays false until that evidence is explicitly
+/// reviewed and ordinary runtime writes are deliberately enabled.
 pub const CLARA_2E_N506: DeviceProfile = DeviceProfile {
     id: "clara-2e-n506-386",
     model: "Kobo Clara 2E",

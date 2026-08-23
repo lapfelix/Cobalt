@@ -19,8 +19,9 @@ touch=fts_ts /dev/input/event1 X=0..1448 Y=0..1072
 Read-only doctor, the physical touch transform, the GC16 refresh, the
 reversible pixel restore, and the whole-screen snapshot/restore now match the
 observed reader. The N506 also uses the older 68-byte NTX `mxc_epdc_fb` update
-ABI; the display layer has a separate implementation for it. `write_ready`
-remains false until exit and restart evidence is reviewed.
+ABI; the display layer has a separate implementation for it. All attended
+display, touch, recovery, and handoff evidence is complete, but `write_ready`
+remains false pending explicit review and enablement.
 
 For a repeat probe:
 
@@ -37,9 +38,9 @@ firmware, kernel, and device code. Compare all fields against the
 
 The profile is covered by profile/layout tests and the touch and display
 evidence is recorded from the physical probe. Keep `write_ready: false` until
-exit and restart smoke evidence has been reviewed on that same reader. Then
-run the remaining Cobalt porting smoke tests and install the package on the
-Clara 2E before enabling ordinary writes.
+the evidence has been reviewed on that same reader and ordinary writes are
+deliberately enabled. Then install the package and run the app smoke tests on
+the Clara 2E.
 
 The Prêt numérique app itself remains safe to develop without this profile:
 its network/UI code can be checked in the host workspace, but no device
