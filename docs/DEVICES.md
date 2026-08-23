@@ -109,8 +109,10 @@ it, so an archive nobody has looked inside is never uploaded. And a running
 Cobalt session is refused rather than worked around, since the files being
 replaced are the ones it is executing.
 
-Neither path starts anything. Run `.adds/cobalt/start.sh` on the reader, or add
-the single NickelMenu line the packaged `README.txt` gives you.
+Neither path starts anything. Run `.adds/cobalt/start.sh` over SSH, or add
+the single NickelMenu line from the Cobalt install instructions. The runtime
+package deliberately contains no README or license files: Kobo indexes plain
+text under `.adds/` as books.
 
 **A stock device cannot launch either of those, and this is the prerequisite
 rather than a footnote.** Running `start.sh` needs a shell, and the NickelMenu
