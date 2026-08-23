@@ -47,13 +47,13 @@ use kobo_ui::{
     render_all, ActionId, Chrome, FontHandle, FramePlanner, Node, PanelWaveform, PictureCache,
     Screen, Surface,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -422,6 +422,46 @@ enum Event {
     /// way so the panel, the touch device, the reader and the freeze watchdog
     /// all go back.
     Stopping(i32),
+}
+
+/// Replaces consecutive, not-yet-painted screens from one application with
+/// the newest one. No other event is crossed: a touch, task wake or stop stays
+/// next in line, preserving the ordering the channel established.
+fn coalesce_screen(
+    id: u64,
+    mut screen: Screen,
+    events: &Receiver<Event>,
+    pending: &mut VecDeque<Event>,
+) -> Screen {
+    loop {
+        match events.try_recv() {
+            Ok(Event::App(next_id, next)) if next_id == id => {
+                let Frame {
+                    request_id,
+                    message,
+                } = *next;
+                match message {
+                    Message::SetScreen(newest) => screen = newest,
+                    message => {
+                        pending.push_back(Event::App(
+                            next_id,
+                            Box::new(Frame {
+                                request_id,
+                                message,
+                            }),
+                        ));
+                        break;
+                    }
+                }
+            }
+            Ok(other) => {
+                pending.push_back(other);
+                break;
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+    screen
 }
 
 /// How long a session may run, and how long it may be ignored.
@@ -1088,6 +1128,7 @@ fn host_applications(
         let mut pressed: Option<(kobo_ui::Rect, kobo_ui::DisplayMetrics)> = None;
         // When and where the finger landed, for telling a tap from a hold.
         let mut landed: Option<(Instant, i32, i32)> = None;
+        let mut pending_events = VecDeque::new();
 
         loop {
             let now = Instant::now();
@@ -1179,7 +1220,10 @@ fn host_applications(
                 .min(back_offered.map_or(BEAT_INTERVAL, |(_, offered_at)| {
                     (offered_at + BACK_GRACE).saturating_duration_since(now)
                 }));
-            match events.recv_timeout(wait) {
+            let event = pending_events
+                .pop_front()
+                .map_or_else(|| events.recv_timeout(wait), Ok);
+            match event {
                 Ok(Event::Stopping(number)) => {
                     return Ok(finish(
                         &apps,
@@ -1361,7 +1405,9 @@ fn host_applications(
                         continue;
                     };
                     match frame.message {
-                        Message::SetScreen(mut screen) => {
+                        Message::SetScreen(screen) => {
+                            let mut screen =
+                                coalesce_screen(id, screen, &events, &mut pending_events);
                             if let Some(local) = screen.reading_font {
                                 screen.reading_font = apps[index].fonts.get(&local).copied();
                             }
@@ -2997,6 +3043,46 @@ mod tests {
         let mut ordinary_grid = keyboard;
         ordinary_grid[3] = grid(4, 3, &["Clear", "0", "Equals"]);
         assert!(!super::is_keyboard_nodes(&ordinary_grid));
+    }
+
+    #[test]
+    fn consecutive_screens_coalesce_without_crossing_a_touch() {
+        let (sender, events) = std::sync::mpsc::channel();
+        for id in [2, 3] {
+            sender
+                .send(super::Event::App(
+                    7,
+                    Box::new(kobo_protocol::Frame {
+                        request_id: 0,
+                        message: kobo_protocol::Message::SetScreen(kobo_ui::Screen::new(
+                            id,
+                            Vec::new(),
+                        )),
+                    }),
+                ))
+                .expect("queue a screen");
+        }
+        sender
+            .send(super::Event::Touch(kobo_hal::touch::TouchEvent::Up {
+                x: 10,
+                y: 20,
+            }))
+            .expect("queue a touch");
+        let mut pending = std::collections::VecDeque::new();
+        let latest = super::coalesce_screen(
+            7,
+            kobo_ui::Screen::new(1, Vec::new()),
+            &events,
+            &mut pending,
+        );
+        assert_eq!(latest.id, 3);
+        assert!(matches!(
+            pending.pop_front(),
+            Some(super::Event::Touch(kobo_hal::touch::TouchEvent::Up {
+                x: 10,
+                y: 20
+            }))
+        ));
     }
 
     /// `TZ` is read from the environment, which is process-global, so these
