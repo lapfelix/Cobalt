@@ -121,8 +121,11 @@ KOBO_PRESENT_UNLOCK=OWNER_ATTENDED_PANEL_SESSION \\
   exec \"$root/bin/kobod\" --present \"$root/bin/kobo-launcher\" > /mnt/onboard/kobod.txt 2>&1
 ";
 
-/// Shipped inside the package, because the thing an owner most needs to find
-/// is how to get rid of it.
+/// Kept in the source tree for the install documentation and package tests.
+/// It is intentionally not copied to the reader: Kobo indexes plain text
+/// files under `.adds/` as books, which would make the platform's legal and
+/// install documents pollute the owner's library.
+#[cfg(test)]
 const INSTALL_README: &str = "\
 Cobalt
 ======
@@ -2945,37 +2948,9 @@ fn build_package_bytes() -> Result<BuiltPackage, String> {
         });
     }
     members.push(text_member("start.sh", START_SCRIPT, true));
-    members.push(text_member("README.txt", INSTALL_README, false));
-    members.push(text_member(
-        "LICENSE",
-        include_str!("../../../LICENSE"),
-        false,
-    ));
-    members.push(text_member(
-        "THIRD-PARTY.md",
-        include_str!("../../../THIRD-PARTY.md"),
-        false,
-    ));
-    members.push(text_member(
-        "licenses/LICENSE-Rust-dependencies.txt",
-        include_str!("../../../licenses/LICENSE-Rust-dependencies.txt"),
-        false,
-    ));
-    members.push(text_member(
-        "licenses/LICENSE-AtkinsonHyperlegible.txt",
-        include_str!("../../kobo-text/fonts/LICENSE-AtkinsonHyperlegible.txt"),
-        false,
-    ));
-    members.push(text_member(
-        "licenses/LICENSE-DejaVu.txt",
-        include_str!("../../kobo-text/fonts/LICENSE-DejaVu.txt"),
-        false,
-    ));
-    members.push(text_member(
-        "VERSION",
-        &format!("{}\n", env!("CARGO_PKG_VERSION")),
-        false,
-    ));
+    // Do not add README/LICENSE/VERSION files here. The source repository
+    // remains fully licensed, while the reader only needs executable runtime
+    // files and this launcher script.
 
     let archive = package::tar(&members)?;
     // Read back rather than trusted. This archive is extracted as root by the
