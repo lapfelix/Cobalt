@@ -15,7 +15,7 @@
 use crate::probe::{probe_device, ProbeError};
 use crate::refresh::{Rect, RefreshPlan};
 use crate::surface::{self, RegionSnapshot, SurfaceError, SurfaceGeometry};
-use kobo_abi::hwtcon;
+use kobo_abi::{hwtcon, mxcfb};
 use kobo_profile::{DeviceProfile, DeviceSnapshot, WRITE_EVIDENCE_PENDING};
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -257,14 +257,50 @@ impl DisplaySession {
         // Validate the region against this exact surface before the kernel sees it.
         surface::RegionPlacement::new(self.geometry, plan.region)?;
         let marker = unique_marker()?;
-        let mut update = plan.update_data(marker);
-        hwtcon::send_update(&self.framebuffer, &mut update)?;
-        let mut wait = hwtcon::HwtconUpdateMarkerData {
-            update_marker: marker,
-            collision_test: 0,
-        };
-        hwtcon::wait_for_update_complete(&self.framebuffer, &mut wait)?;
+        if self.profile.framebuffer_id == "mxc_epdc_fb" {
+            let mut update = mxcfb::MxcfbUpdateDataV1Ntx {
+                update_region: mxcfb::MxcfbRect {
+                    top: plan.region.y,
+                    left: plan.region.x,
+                    width: plan.region.width,
+                    height: plan.region.height,
+                },
+                waveform_mode: mxcfb_waveform(plan.waveform),
+                update_mode: if plan.full {
+                    mxcfb::UPDATE_MODE_FULL
+                } else {
+                    mxcfb::UPDATE_MODE_PARTIAL
+                },
+                update_marker: marker,
+                temp: mxcfb::TEMP_USE_AMBIENT,
+                flags: 0,
+                alt_buffer_data: mxcfb::MxcfbAltBufferDataNtx::default(),
+            };
+            mxcfb::send_update(&self.framebuffer, &mut update)?;
+            let mut wait = mxcfb::MxcfbUpdateMarkerData {
+                update_marker: marker,
+                collision_test: 0,
+            };
+            mxcfb::wait_for_update_complete(&self.framebuffer, &mut wait)?;
+        } else {
+            let mut update = plan.update_data(marker);
+            hwtcon::send_update(&self.framebuffer, &mut update)?;
+            let mut wait = hwtcon::HwtconUpdateMarkerData {
+                update_marker: marker,
+                collision_test: 0,
+            };
+            hwtcon::wait_for_update_complete(&self.framebuffer, &mut wait)?;
+        }
         Ok(())
+    }
+}
+
+/// The NTx driver assigns GL16 a different waveform number than HWTCON.
+fn mxcfb_waveform(waveform: u32) -> u32 {
+    if waveform == hwtcon::WAVEFORM_GL16 {
+        mxcfb::WAVEFORM_GL16
+    } else {
+        waveform
     }
 }
 
@@ -420,10 +456,10 @@ mod tests {
         SMOKE_PATCH_REGION, SMOKE_VISIBLE_HOLD,
     };
     use crate::surface::{RegionPlacement, SurfaceGeometry};
-    use kobo_abi::hwtcon;
+    use kobo_abi::{hwtcon, mxcfb};
     use kobo_profile::{
         DeviceProfile, DeviceSnapshot, FramebufferSnapshot, IdentitySnapshot, TouchSnapshot,
-        CLARA_BW_391, ELIPSA_2E_389, WRITE_EVIDENCE_PENDING,
+        CLARA_2E_N506, CLARA_BW_391, ELIPSA_2E_389, WRITE_EVIDENCE_PENDING,
     };
     use std::path::Path;
 
@@ -588,7 +624,7 @@ mod tests {
 
     #[test]
     fn hal_owned_smoke_regions_are_bounded_on_every_registered_panel() {
-        for profile in [&CLARA_BW_391, &ELIPSA_2E_389] {
+        for profile in [&CLARA_BW_391, &ELIPSA_2E_389, &CLARA_2E_N506] {
             let geometry = SurfaceGeometry {
                 width: profile.width,
                 height: profile.height,
@@ -611,6 +647,23 @@ mod tests {
             };
             RegionPlacement::new(geometry, whole).expect("whole panel is valid");
         }
+    }
+
+    #[test]
+    fn mxc_epdc_uses_the_ntx_waveform_number_for_gl16() {
+        assert_eq!(
+            super::mxcfb_waveform(hwtcon::WAVEFORM_GC16),
+            mxcfb::WAVEFORM_GC16
+        );
+        assert_eq!(
+            super::mxcfb_waveform(hwtcon::WAVEFORM_DU),
+            mxcfb::WAVEFORM_DU
+        );
+        assert_eq!(
+            super::mxcfb_waveform(hwtcon::WAVEFORM_GL16),
+            mxcfb::WAVEFORM_GL16
+        );
+        assert_ne!(hwtcon::WAVEFORM_GL16, mxcfb::WAVEFORM_GL16);
     }
 
     #[test]

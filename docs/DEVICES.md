@@ -13,6 +13,7 @@ and touch profile. A matching model name alone is not sufficient.
 |---|---|---|---|
 | Kobo Clara BW | N365, code 391, firmware 4.45.23697, kernel 4.9.77 | Read-only probe and owner-attended display, touch, exit, and recovery tests complete | Fully tested |
 | Kobo Elipsa 2E | N605, code 389, firmware 4.38.23697, kernel 4.9.77 | Read-only probe and owner-attended display, touch, exit, suspend/resume, and recovery tests complete | Fully tested |
+| Kobo Clara 2E | N506, code 386, firmware 4.38.23697, kernel 4.1.15 | Read-only probe, physical touch transform, and NTx display refresh/pixel-restore smoke complete; exit, recovery, and whole-screen evidence pending | Profile registered; ordinary writes blocked |
 
 `Read-only doctor match complete` means the profile describes the observed
 identity, framebuffer, and touch ranges. It does not prove the physical touch

@@ -106,7 +106,64 @@ pub const ELIPSA_2E_389: DeviceProfile = DeviceProfile {
     write_ready: true,
 };
 
-pub const SUPPORTED_PROFILES: &[&DeviceProfile] = &[&CLARA_BW_391, &ELIPSA_2E_389];
+/// Read-only profile measured on the Prêt numérique Clara 2E.
+///
+/// The identity and geometry come from `kobo doctor` on the physical N506.
+/// `write_ready` stays false until owner-attended display, touch, exit, and
+/// recovery evidence has been completed on this same reader.
+pub const CLARA_2E_N506: DeviceProfile = DeviceProfile {
+    id: "clara-2e-n506-386",
+    model: "Kobo Clara 2E",
+    device_code: 386,
+    device_tree_model: "Freescale i.MX6SLL NTX Board",
+    compatible_fragments: &["fsl,imx6sll-lpddr3-arm2", "fsl,imx6sll"],
+    framebuffer_id: "mxc_epdc_fb",
+    width: 1072,
+    height: 1448,
+    pixels_per_inch: 300,
+    virtual_width: 1088,
+    virtual_height: 1536,
+    x_offset: 0,
+    y_offset: 0,
+    bits_per_pixel: 32,
+    grayscale: 0,
+    stride: 4352,
+    memory_length: 6_782_976,
+    framebuffer_kind: 0,
+    framebuffer_visual: 2,
+    rotation: 3,
+    red: Bitfield {
+        offset: 16,
+        length: 8,
+        msb_right: 0,
+    },
+    green: Bitfield {
+        offset: 8,
+        length: 8,
+        msb_right: 0,
+    },
+    blue: Bitfield {
+        offset: 0,
+        length: 8,
+        msb_right: 0,
+    },
+    alpha: Bitfield {
+        offset: 24,
+        length: 8,
+        msb_right: 0,
+    },
+    touch_name: "fts_ts",
+    touch_x_min: 0,
+    touch_x_max: 1448,
+    touch_y_min: 0,
+    touch_y_max: 1072,
+    serial_prefix: "N506",
+    firmware_version: "4.38.23697",
+    kernel_release: "4.1.15",
+    write_ready: false,
+};
+
+pub const SUPPORTED_PROFILES: &[&DeviceProfile] = &[&CLARA_BW_391, &ELIPSA_2E_389, &CLARA_2E_N506];
 
 #[must_use]
 pub fn identify_profile(snapshot: &DeviceSnapshot) -> Option<&'static DeviceProfile> {
@@ -675,7 +732,7 @@ fn compare_identity(blockers: &mut Vec<String>, name: &str, expected: &str, actu
 mod tests {
     use super::{
         Bitfield, DeviceProfile, DeviceSnapshot, FramebufferSnapshot, IdentitySnapshot, Readiness,
-        TouchSnapshot, CLARA_BW_391, ELIPSA_2E_389, WRITE_EVIDENCE_PENDING,
+        TouchSnapshot, CLARA_2E_N506, CLARA_BW_391, ELIPSA_2E_389, WRITE_EVIDENCE_PENDING,
     };
 
     #[test]
@@ -718,6 +775,94 @@ mod tests {
         }
         assert_eq!(ELIPSA_2E_389.display_to_touch(1404, 0), None);
         assert_eq!(ELIPSA_2E_389.display_to_touch(0, 1872), None);
+    }
+
+    #[test]
+    fn clara_2e_n506_matches_the_measured_probe_but_blocks_writes() {
+        let snapshot = DeviceSnapshot {
+            compatible: vec!["fsl,imx6sll-lpddr3-arm2".into(), "fsl,imx6sll".into()],
+            model: Some("Freescale i.MX6SLL NTX Board".into()),
+            framebuffer: Some(FramebufferSnapshot {
+                id: "mxc_epdc_fb".into(),
+                width: 1072,
+                height: 1448,
+                virtual_width: 1088,
+                virtual_height: 1536,
+                x_offset: 0,
+                y_offset: 0,
+                bits_per_pixel: 32,
+                grayscale: 0,
+                stride: 4352,
+                memory_length: 6_782_976,
+                kind: 0,
+                visual: 2,
+                rotation: 3,
+                red: Bitfield {
+                    offset: 16,
+                    length: 8,
+                    msb_right: 0,
+                },
+                green: Bitfield {
+                    offset: 8,
+                    length: 8,
+                    msb_right: 0,
+                },
+                blue: Bitfield {
+                    offset: 0,
+                    length: 8,
+                    msb_right: 0,
+                },
+                alpha: Bitfield {
+                    offset: 24,
+                    length: 8,
+                    msb_right: 0,
+                },
+            }),
+            touch: Some(TouchSnapshot {
+                path: "/dev/input/event1".into(),
+                name: "fts_ts".into(),
+                x_min: 0,
+                x_max: 1448,
+                y_min: 0,
+                y_max: 1072,
+            }),
+            identity: IdentitySnapshot {
+                serial_prefix: Some("N506".into()),
+                firmware_version: Some("4.38.23697".into()),
+                kernel_release: Some("4.1.15".into()),
+                device_code: Some(386),
+            },
+        };
+        let report = CLARA_2E_N506.validate(&snapshot);
+        assert_eq!(report.readiness, Readiness::ReadOnlyMatched);
+        assert!(report.mismatches.is_empty());
+        assert_eq!(report.write_blockers, vec![WRITE_EVIDENCE_PENDING]);
+        assert_eq!(
+            super::identify_profile(&snapshot).map(|profile| profile.id),
+            Some("clara-2e-n506-386")
+        );
+        assert_eq!(CLARA_2E_N506.touch_to_display(0, 1072), Some((0, 0)));
+        assert_eq!(CLARA_2E_N506.touch_to_display(1448, 0), Some((1071, 1447)));
+    }
+
+    /// Captured from the physical N506 with `kobo touch-probe`, read-only and
+    /// ungrabbed. The owner tapped roughly one centimetre inside each corner
+    /// and the centre; the transformed points land at the same visible spots.
+    #[test]
+    fn clara_2e_touch_transform_matches_physical_probe() {
+        for (raw, display) in [
+            ((80, 991), (81, 80)),
+            ((72, 34), (1037, 72)),
+            ((1381, 94), (977, 1380)),
+            ((1368, 995), (77, 1367)),
+            ((687, 584), (488, 687)),
+        ] {
+            assert_eq!(
+                CLARA_2E_N506.touch_to_display(raw.0, raw.1),
+                Some(display),
+                "raw {raw:?} should map to the observed display point"
+            );
+        }
     }
 
     /// Captured from a physical touch on the real Clara BW with

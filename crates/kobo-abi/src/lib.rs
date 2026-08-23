@@ -1,4 +1,4 @@
-//! Minimal Linux ABI declarations used by the Kobo Clara BW runtime.
+//! Minimal Linux ABI declarations used by the Kobo runtime profiles.
 //!
 //! Query operations are always available. Mutating HWTCON requests are compiled
 //! only with the explicitly opt-in `device-write` feature.
@@ -574,6 +574,95 @@ pub mod hwtcon {
         marker: &mut HwtconUpdateMarkerData,
     ) -> io::Result<()> {
         mutating_ioctl(file, HWTCON_WAIT_FOR_UPDATE_COMPLETE, marker)
+    }
+}
+
+/// The older NTX EPDC ABI used by i.MX6SLL readers such as the Clara 2E.
+///
+/// The newer HWTCON-compatible request has the same ioctl number but encodes a
+/// 36-byte structure. The N506's `mxc_epdc_fb` driver expects the original
+/// 68-byte NTX structure instead; keeping both ABIs explicit prevents a
+/// framebuffer profile from accidentally sending the wrong request number to
+/// a different kernel.
+pub mod mxcfb {
+    use super::{iow, iowr};
+    #[cfg(feature = "device-write")]
+    use super::{mutating_ioctl, File};
+    #[cfg(feature = "device-write")]
+    use std::io;
+
+    pub const UPDATE_MODE_PARTIAL: u32 = 0;
+    pub const UPDATE_MODE_FULL: u32 = 1;
+    pub const WAVEFORM_INIT: u32 = 0;
+    pub const WAVEFORM_DU: u32 = 1;
+    pub const WAVEFORM_GC16: u32 = 2;
+    pub const WAVEFORM_GC4: u32 = 3;
+    pub const WAVEFORM_A2: u32 = 4;
+    pub const WAVEFORM_GL16: u32 = 5;
+    pub const WAVEFORM_GLR16: u32 = 6;
+    pub const WAVEFORM_GLD16: u32 = 7;
+    pub const WAVEFORM_AUTO: u32 = 257;
+    pub const TEMP_USE_AMBIENT: i32 = 0x1000;
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    #[repr(C)]
+    pub struct MxcfbRect {
+        pub top: u32,
+        pub left: u32,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    #[repr(C)]
+    pub struct MxcfbAltBufferDataNtx {
+        pub virt_addr: u32,
+        pub phys_addr: u32,
+        pub width: u32,
+        pub height: u32,
+        pub alt_update_region: MxcfbRect,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    #[repr(C)]
+    pub struct MxcfbUpdateDataV1Ntx {
+        pub update_region: MxcfbRect,
+        pub waveform_mode: u32,
+        pub update_mode: u32,
+        pub update_marker: u32,
+        pub temp: i32,
+        pub flags: u32,
+        pub alt_buffer_data: MxcfbAltBufferDataNtx,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    #[repr(C)]
+    pub struct MxcfbUpdateMarkerData {
+        pub update_marker: u32,
+        pub collision_test: u32,
+    }
+
+    const _: [(); 16] = [(); std::mem::size_of::<MxcfbRect>()];
+    const _: [(); 32] = [(); std::mem::size_of::<MxcfbAltBufferDataNtx>()];
+    const _: [(); 68] = [(); std::mem::size_of::<MxcfbUpdateDataV1Ntx>()];
+    const _: [(); 8] = [(); std::mem::size_of::<MxcfbUpdateMarkerData>()];
+
+    pub const MXCFB_SEND_UPDATE_V1_NTX: u64 = iow(b'F', 0x2e, 68);
+    pub const MXCFB_WAIT_FOR_UPDATE_COMPLETE: u64 = iowr(b'F', 0x2f, 8);
+
+    /// Submits an update through the NTx `mxc_epdc_fb` ABI.
+    #[cfg(feature = "device-write")]
+    pub fn send_update(file: &File, update: &mut MxcfbUpdateDataV1Ntx) -> io::Result<()> {
+        mutating_ioctl(file, MXCFB_SEND_UPDATE_V1_NTX, update)
+    }
+
+    /// Waits for an NTx update marker to complete.
+    #[cfg(feature = "device-write")]
+    pub fn wait_for_update_complete(
+        file: &File,
+        marker: &mut MxcfbUpdateMarkerData,
+    ) -> io::Result<()> {
+        mutating_ioctl(file, MXCFB_WAIT_FOR_UPDATE_COMPLETE, marker)
     }
 }
 
