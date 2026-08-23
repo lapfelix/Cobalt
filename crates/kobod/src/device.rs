@@ -44,8 +44,8 @@ use kobo_policy::{Backends, Capability, Declared, DeviceServices, PowerPolicy, T
 use kobo_profile::DeviceProfile;
 use kobo_protocol::{Frame, Lifecycle, Message, TaskError, TaskOutcome};
 use kobo_ui::{
-    render_all, ActionId, Chrome, FontHandle, FramePlanner, PanelWaveform, PictureCache, Screen,
-    Surface,
+    render_all, ActionId, Chrome, FontHandle, FramePlanner, Node, PanelWaveform, PictureCache,
+    Screen, Surface,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -1241,6 +1241,7 @@ fn host_applications(
                         || Chrome::with_back(!at_home),
                         |screen| chrome_for(screen, at_home, &mut status),
                     );
+                    let quick_input = screen.as_ref().is_some_and(is_keyboard_screen);
                     // A control shows that it has been touched, before
                     // anything it does can be seen. Without this the panel is
                     // simply still for as long as the application takes to
@@ -1256,14 +1257,16 @@ fn host_applications(
                             TouchEvent::Down { x, y } => {
                                 if let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) {
                                     landed = Some((Instant::now(), x, y));
-                                    if let Some(rect) = current
-                                        .layout_with(&metrics_for(current), &chrome)
-                                        .pressed_control(x, y)
-                                    {
-                                        let metrics = metrics_for(current);
-                                        surface.invert_press(rect, &metrics);
-                                        panel.paint(display, whole_screen, &surface)?;
-                                        pressed = Some((rect, metrics));
+                                    if !quick_input {
+                                        if let Some(rect) = current
+                                            .layout_with(&metrics_for(current), &chrome)
+                                            .pressed_control(x, y)
+                                        {
+                                            let metrics = metrics_for(current);
+                                            surface.invert_press(rect, &metrics);
+                                            panel.paint(display, whole_screen, &surface)?;
+                                            pressed = Some((rect, metrics));
+                                        }
                                     }
                                 }
                             }
@@ -1363,6 +1366,9 @@ fn host_applications(
                                 screen.reading_font = apps[index].fonts.get(&local).copied();
                             }
                             let is_front = id == front;
+                            let quick_input =
+                                apps[index].screen.as_ref().is_some_and(is_keyboard_screen)
+                                    && is_keyboard_screen(&screen);
                             if is_front {
                                 last_activity = Instant::now();
                             }
@@ -1393,7 +1399,11 @@ fn host_applications(
                                     &mut surface,
                                     None,
                                 );
-                                panel.paint(display, whole_screen, &surface)?;
+                                if quick_input {
+                                    panel.paint_fast(display, whole_screen, &surface)?;
+                                } else {
+                                    panel.paint(display, whole_screen, &surface)?;
+                                }
                                 apps[index].painted += 1;
                             }
                             // Kept either way. A background application that
@@ -2665,6 +2675,45 @@ enum Tap {
     OfferedBack,
 }
 
+/// Whether this is the SDK's text keyboard composite.
+///
+/// A keyboard is intentionally built from ordinary grids, so it carries no
+/// protocol-only widget tag. Its four-row shape and the three invariant
+/// utility labels distinguish it from calculators, games and choice grids.
+fn is_keyboard_screen(screen: &Screen) -> bool {
+    is_keyboard_nodes(&screen.nodes)
+}
+
+fn is_keyboard_nodes(nodes: &[Node]) -> bool {
+    let grids = nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Grid { columns, cells, .. } => Some((*columns, cells)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if grids.len() != 4 || grids[0].0 != 10 || grids[1].0 != 9 || grids[2].0 != 9 || grids[3].0 != 3
+    {
+        return false;
+    }
+    grids[2]
+        .1
+        .first()
+        .is_some_and(|cell| cell.label.eq_ignore_ascii_case("shift"))
+        && grids[2]
+            .1
+            .last()
+            .is_some_and(|cell| cell.label.eq_ignore_ascii_case("back"))
+        && grids[3]
+            .1
+            .first()
+            .is_some_and(|cell| matches!(cell.label.as_str(), "?123" | "abc"))
+        && grids[3]
+            .1
+            .get(1)
+            .is_some_and(|cell| cell.label.eq_ignore_ascii_case("space"))
+}
+
 /// Routes one tap. Reports what the runtime has to do about it.
 ///
 /// Going back is the runtime's affordance, not the application's: an
@@ -2761,6 +2810,28 @@ impl Painter {
         whole_screen: Rect,
         surface: &Surface,
     ) -> Result<(), String> {
+        self.paint_with(display, whole_screen, surface, false)
+    }
+
+    /// Repaints rapidly changing input without spending a sixteen-level
+    /// waveform on every character. Opening and closing the keyboard still use
+    /// the ordinary planner, which gives the panel a clean, antialiased frame.
+    fn paint_fast(
+        &mut self,
+        display: &DisplaySession,
+        whole_screen: Rect,
+        surface: &Surface,
+    ) -> Result<(), String> {
+        self.paint_with(display, whole_screen, surface, true)
+    }
+
+    fn paint_with(
+        &mut self,
+        display: &DisplaySession,
+        whole_screen: Rect,
+        surface: &Surface,
+        prefer_fast: bool,
+    ) -> Result<(), String> {
         let Some(transition) = self.frames.plan(surface) else {
             // Nothing moved. Refreshing anyway costs a visible flicker and
             // some battery to show exactly the same picture.
@@ -2772,10 +2843,12 @@ impl Painter {
             width: u32::try_from(transition.region.width).unwrap_or(0),
             height: u32::try_from(transition.region.height).unwrap_or(0),
         };
-        let intent = match transition.waveform {
-            PanelWaveform::Du => RefreshIntent::FastFeedback,
-            PanelWaveform::Gl16 => RefreshIntent::TextContent,
-            PanelWaveform::Gc16 => RefreshIntent::QualityContent,
+        let intent = match (prefer_fast, transition.waveform) {
+            (true, PanelWaveform::Du | PanelWaveform::Gl16) | (false, PanelWaveform::Du) => {
+                RefreshIntent::FastFeedback
+            }
+            (false, PanelWaveform::Gl16) => RefreshIntent::TextContent,
+            (_, PanelWaveform::Gc16) => RefreshIntent::QualityContent,
         };
 
         let frame =
@@ -2896,6 +2969,36 @@ fn pump_application(
 
 #[cfg(test)]
 mod tests {
+    use kobo_ui::{ActionId, Cell, Node, NodeId};
+
+    fn grid(id: u32, columns: u8, labels: &[&str]) -> Node {
+        Node::Grid {
+            id: NodeId(id),
+            columns,
+            square: false,
+            cells: labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| Cell::new(ActionId(index as u32 + 1), *label))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn only_the_sdk_keyboard_shape_gets_fast_input_updates() {
+        let keyboard = vec![
+            grid(1, 10, &["q"; 10]),
+            grid(2, 9, &["a"; 9]),
+            grid(3, 9, &["shift", "z", "x", "c", "v", "b", "n", "m", "back"]),
+            grid(4, 3, &["?123", "space", "Search"]),
+        ];
+        assert!(super::is_keyboard_nodes(&keyboard));
+
+        let mut ordinary_grid = keyboard;
+        ordinary_grid[3] = grid(4, 3, &["Clear", "0", "Equals"]);
+        assert!(!super::is_keyboard_nodes(&ordinary_grid));
+    }
+
     /// `TZ` is read from the environment, which is process-global, so these
     /// are one test rather than several: two tests setting it at once would
     /// see each other's value.
