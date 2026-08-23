@@ -439,14 +439,18 @@ impl PretNumerique {
             screen = screen.empty_state("No borrow or return jobs yet.");
         } else {
             screen = screen.rows_with_menu(self.jobs.iter().enumerate().map(|(index, job)| {
+                let state = state_label(&job.state);
+                let state = job.error.as_deref().map_or_else(
+                    || state.to_owned(),
+                    |error| format!("{state} · {}", compact_message(error, 120)),
+                );
                 (
                     format!("job.{index}"),
                     job.title.clone(),
                     format!(
-                        "{} · {} · {}",
+                        "{} · {} · {state}",
                         catalog_label(&job.catalog),
-                        kind_label(&job.kind),
-                        state_label(&job.state)
+                        kind_label(&job.kind)
                     ),
                     Glyph::Circle,
                     if job.state == "hook_failed" {
@@ -788,10 +792,21 @@ impl PretNumerique {
                         self.jobs.insert(0, job);
                         self.jobs.truncate(MAX_JOBS);
                         self.loading = false;
-                        self.note = Some(
-                            "The server accepted the request. Nothing was downloaded to this Kobo."
-                                .to_owned(),
-                        );
+                        self.note = Some(match kind {
+                            RequestKind::Borrow => {
+                                "The server accepted the borrow. The LCPL stays at home; nothing was downloaded to this Kobo."
+                                    .to_owned()
+                            }
+                            RequestKind::Return => {
+                                "The server accepted the return. This Kobo never held the LCPL."
+                                    .to_owned()
+                            }
+                            RequestKind::RetryHook => {
+                                "The server accepted the hook retry. The LCPL stays on the home server."
+                                    .to_owned()
+                            }
+                            _ => "The server accepted the request.".to_owned(),
+                        });
                         self.schedule_queue_poll(context);
                     }
                     None => {
@@ -1011,6 +1026,15 @@ fn author_line(authors: &[String]) -> String {
     }
 }
 
+fn compact_message(message: &str, limit: usize) -> String {
+    let mut compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > limit {
+        compact = compact.chars().take(limit.saturating_sub(1)).collect();
+        compact.push('…');
+    }
+    compact
+}
+
 fn catalog_label(catalog: &str) -> &'static str {
     match catalog {
         "montreal" => "Montréal",
@@ -1067,13 +1091,7 @@ fn state_label(state: &str) -> &str {
 fn is_active_state(state: &str) -> bool {
     matches!(
         state,
-        "queued"
-            | "auth_required"
-            | "borrowing"
-            | "downloading"
-            | "stored"
-            | "hook_running"
-            | "returning"
+        "queued" | "borrowing" | "downloading" | "stored" | "hook_running" | "returning"
     )
 }
 
@@ -1247,8 +1265,9 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_label, kind_label, parse_books, parse_job, parse_search, state_label, Book,
-        PretNumerique, SearchResult, Source, View, API, CONFIRM_BORROW, CONFIRM_RETURN,
+        availability_label, compact_message, is_active_state, kind_label, parse_books, parse_job,
+        parse_search, state_label, Book, Job, PretNumerique, SearchResult, Source, View, API,
+        CONFIRM_BORROW, CONFIRM_RETURN,
     };
     use kobo_sdk::{action_id, AppRunner, Command, Context, KoboApp, StoreResult, Task};
 
@@ -1298,6 +1317,38 @@ mod tests {
             }),
             "Available now"
         );
+    }
+
+    #[test]
+    fn authentication_required_jobs_wait_for_an_explicit_refresh() {
+        assert!(!is_active_state("auth_required"));
+        assert!(is_active_state("downloading"));
+        assert!(is_active_state("returning"));
+    }
+
+    #[test]
+    fn queue_rows_keep_a_bounded_server_error_visible() {
+        let app = PretNumerique {
+            view: View::Queue,
+            jobs: vec![Job {
+                id: "job-id".to_owned(),
+                kind: "borrow".to_owned(),
+                state: "failed".to_owned(),
+                title: "A title".to_owned(),
+                catalog: "montreal".to_owned(),
+                error: Some("The server returned a very long explanation that should remain readable on the panel without becoming an unbounded layout line.".to_owned()),
+            }],
+            ..PretNumerique::default()
+        };
+        let screen = format!("{:?}", app.queue_screen());
+        assert!(screen.contains("Failed · The server returned a very long"));
+        assert!(!screen.contains("unbounded layout line"));
+    }
+
+    #[test]
+    fn compact_message_collapses_whitespace_and_adds_an_ellipsis() {
+        assert_eq!(compact_message("one\n two   three", 12), "one two thr…");
+        assert_eq!(compact_message("short", 20), "short");
     }
 
     #[test]
