@@ -2185,7 +2185,7 @@ fn pret_fixture_fetch(
 
 fn pret_fixture_post(
     url: &str,
-    _body: &[u8],
+    request_body: &[u8],
     _content_type: &str,
     _credential: Option<(&str, &str)>,
     _headers: &[(&str, &str)],
@@ -2194,10 +2194,23 @@ fn pret_fixture_post(
     let Some(path) = pret_fixture_path(url) else {
         return Err(kobo_protocol::TaskError::NotFound);
     };
+    let request_text = String::from_utf8_lossy(request_body).to_ascii_lowercase();
     let body: &[u8] = if path == "/search" {
-        r#"{"results":[{"title":"Dune","authors":["Frank Herbert"],"isbn":"9780441013593","sources":[{"handle":"fixture-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+        if request_text.contains("hamlet") {
+            r#"{"results":[{"title":"Hamlet","authors":["William Shakespeare"],"isbn":"9780743477123","sources":[{"handle":"fixture-hamlet-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"On loan","is_available":false},{"handle":"fixture-hamlet-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+        } else if request_text.contains("earthsea") {
+            r#"{"results":[{"title":"A Wizard of Earthsea","authors":["Ursula K. Le Guin"],"isbn":"9780547773742","sources":[{"handle":"fixture-earthsea-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-earthsea-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"On loan","is_available":false}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+        } else {
+            r#"{"results":[{"title":"Dune","authors":["Frank Herbert"],"isbn":"9780441013593","sources":[{"handle":"fixture-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+        }
     } else if path == "/jobs" {
-        br#"{"id":"fixture-borrow-job","kind":"borrow","state":"queued","title":"Dune","catalog":"montreal"}"#
+        if request_text.contains("fixture-hamlet-banq-handle") {
+            br#"{"id":"fixture-hamlet-borrow-job","kind":"borrow","state":"queued","title":"Hamlet","catalog":"banq"}"#
+        } else if request_text.contains("fixture-earthsea-montreal-handle") {
+            br#"{"id":"fixture-earthsea-borrow-job","kind":"borrow","state":"queued","title":"A Wizard of Earthsea","catalog":"montreal"}"#
+        } else {
+            br#"{"id":"fixture-borrow-job","kind":"borrow","state":"queued","title":"Dune","catalog":"montreal"}"#
+        }
     } else if path.starts_with("/jobs/") && path.ends_with("/retry-hook") {
         br#"{"id":"fixture-hook-retry","kind":"import","state":"queued","title":"Hook fixture","catalog":"banq"}"#
     } else if path.starts_with("/books/") && path.ends_with("/return") {
