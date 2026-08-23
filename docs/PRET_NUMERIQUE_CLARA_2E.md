@@ -16,10 +16,11 @@ framebuffer=mxc_epdc_fb 1072x1448 virtual=1088x1536 stride=4352 map=6782976 rota
 touch=fts_ts /dev/input/event1 X=0..1448 Y=0..1072
 ```
 
-Read-only doctor and the physical touch transform now match. The N506 also
-uses the older 68-byte NTX `mxc_epdc_fb` update ABI; the display layer has a
-separate implementation for it. `write_ready` remains false until the
-remaining attended display, exit, recovery, and restart evidence is reviewed.
+Read-only doctor, the physical touch transform, the GC16 refresh, the
+reversible pixel restore, and the whole-screen snapshot/restore now match the
+observed reader. The N506 also uses the older 68-byte NTX `mxc_epdc_fb` update
+ABI; the display layer has a separate implementation for it. `write_ready`
+remains false until exit, recovery, and restart evidence is reviewed.
 
 For a repeat probe:
 
@@ -34,10 +35,10 @@ framebuffer geometry and pixel fields, touch device/ranges, serial prefix,
 firmware, kernel, and device code. Compare all fields against the
 `DeviceProfile` validation in `crates/kobo-profile/src/lib.rs`.
 
-The profile is covered by profile/layout tests and the touch evidence is
-recorded from the physical probe. Keep `write_ready: false` until attended
-display, touch, exit, and recovery smoke evidence has been reviewed on that
-same reader. Then run the remaining Cobalt porting smoke tests and install the
+The profile is covered by profile/layout tests and the touch and display
+evidence is recorded from the physical probe. Keep `write_ready: false` until
+exit, recovery, and restart smoke evidence has been reviewed on that same
+reader. Then run the remaining Cobalt porting smoke tests and install the
 package on the Clara 2E before enabling ordinary writes.
 
 The Prêt numérique app itself remains safe to develop without this profile:
