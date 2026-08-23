@@ -18,6 +18,7 @@ const API_SECRET: &str = "pret-numerique-api";
 const STORE_STATE: &str = "ui-state";
 const MAX_RESULTS: usize = 40;
 const MAX_QUERY_CHARS: usize = 80;
+const MAX_DETAIL_DESCRIPTION_CHARS: usize = 240;
 const MAX_JOBS: usize = 24;
 const SEARCH: &str = "search-tab";
 const LIBRARY: &str = "library-tab";
@@ -336,7 +337,9 @@ impl PretNumerique {
             ),
         ]);
         if let Some(description) = &result.description {
-            screen = screen.section("About this book").text(description.clone());
+            screen = screen
+                .section("About this book")
+                .text(compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS));
         }
         if let Some(rating) = result.goodreads_rating {
             screen = screen.section("Goodreads").facts([
@@ -1414,6 +1417,35 @@ mod tests {
         assert!(screen.contains("4.3 / 5"));
         assert!(screen.contains("1,700,633"));
         assert!(screen.contains("88,668"));
+    }
+
+    #[test]
+    fn detail_screen_bounds_long_descriptions_before_library_actions() {
+        let result = SearchResult {
+            title: "Book".to_owned(),
+            authors: vec!["Author".to_owned()],
+            isbn: None,
+            description: Some("A very long description. ".repeat(40)),
+            goodreads_rating: None,
+            goodreads_ratings_count: None,
+            goodreads_reviews_count: None,
+            sources: vec![Source {
+                handle: "opaque".to_owned(),
+                catalog: "banq".to_owned(),
+                catalog_name: "BAnQ".to_owned(),
+                availability: "available".to_owned(),
+                available: true,
+            }],
+        };
+        let app = PretNumerique {
+            results: vec![result],
+            selected_result: Some(0),
+            ..PretNumerique::default()
+        };
+        let screen = format!("{:?}", app.detail_screen());
+        assert!(screen.contains("Choose a library"));
+        assert!(screen.contains("..."));
+        assert!(!screen.contains(&"A very long description. ".repeat(40)));
     }
 
     #[test]
