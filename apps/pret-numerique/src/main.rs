@@ -339,21 +339,17 @@ impl PretNumerique {
                 .text(compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS));
         }
         if let Some(rating) = result.goodreads_rating {
-            screen = screen.section("Goodreads").facts([
-                ("Score", format!("{rating:.1} / 5")),
-                (
-                    "Ratings",
-                    result
-                        .goodreads_ratings_count
-                        .map_or_else(|| "Not listed".to_owned(), count_label),
-                ),
-                (
-                    "Reviews",
-                    result
-                        .goodreads_reviews_count
-                        .map_or_else(|| "Not listed".to_owned(), count_label),
-                ),
-            ]);
+            let ratings = result.goodreads_ratings_count.map_or_else(
+                || "ratings not listed".to_owned(),
+                |count| format!("{} ratings", count_label(count)),
+            );
+            let reviews = result.goodreads_reviews_count.map_or_else(
+                || "reviews not listed".to_owned(),
+                |count| format!("{} reviews", count_label(count)),
+            );
+            screen = screen
+                .section("Goodreads")
+                .secondary(format!("{rating:.1} / 5 · {ratings} · {reviews}"));
         }
         screen = screen.section("Choose a library");
         screen = screen.rows(
