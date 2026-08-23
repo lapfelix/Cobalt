@@ -326,15 +326,16 @@ impl PretNumerique {
                 .iter()
                 .enumerate()
                 .map(|(source_index, source)| {
-                    let status = if source.available {
-                        "Available · Borrow & send"
+                    let status = availability_label(source);
+                    let action = if source.available {
+                        "Borrow & send"
                     } else {
                         "Unavailable"
                     };
                     (
                         format!("source.{source_index}"),
                         source.catalog_name.clone(),
-                        format!("{status} · {}", source.availability),
+                        format!("{status} · {action}"),
                         Glyph::Globe,
                     )
                 }),
@@ -449,7 +450,7 @@ impl PretNumerique {
                     format!(
                         "{} · {} · {}",
                         catalog_label(&job.catalog),
-                        job.kind,
+                        kind_label(&job.kind),
                         state_label(&job.state)
                     ),
                     Glyph::Circle,
@@ -540,6 +541,7 @@ impl PretNumerique {
 
     fn start_books(&mut self, context: &mut Context) {
         if self.inflight.is_some() {
+            self.show(context);
             return;
         }
         self.loading = true;
@@ -595,6 +597,7 @@ impl PretNumerique {
 
     fn start_health(&mut self, context: &mut Context) {
         if self.inflight.is_some() {
+            self.show(context);
             return;
         }
         self.loading = true;
@@ -614,6 +617,9 @@ impl PretNumerique {
     }
 
     fn start_borrow(&mut self, context: &mut Context) {
+        if self.inflight.is_some() {
+            return;
+        }
         let Some(result_index) = self.selected_result else {
             return;
         };
@@ -651,6 +657,9 @@ impl PretNumerique {
     }
 
     fn start_return(&mut self, context: &mut Context) {
+        if self.inflight.is_some() {
+            return;
+        }
         let Some(index) = self.selected_book else {
             return;
         };
@@ -1015,6 +1024,32 @@ fn catalog_label(catalog: &str) -> &'static str {
     }
 }
 
+fn kind_label(kind: &str) -> &str {
+    match kind {
+        "borrow" => "Borrow",
+        "return" => "Return",
+        _ => kind,
+    }
+}
+
+fn availability_label(source: &Source) -> String {
+    let value = source.availability.trim();
+    if source.available {
+        if value.is_empty() || value.eq_ignore_ascii_case("available") {
+            "Available now".to_owned()
+        } else {
+            value.to_owned()
+        }
+    } else if value.is_empty()
+        || value.eq_ignore_ascii_case("available")
+        || value.eq_ignore_ascii_case("unavailable")
+    {
+        "Not currently available".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
 fn state_label(state: &str) -> &str {
     match state {
         "auth_required" => "Authentication needed",
@@ -1216,7 +1251,10 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_books, parse_job, parse_search, state_label, PretNumerique};
+    use super::{
+        availability_label, kind_label, parse_books, parse_job, parse_search, state_label,
+        PretNumerique, Source,
+    };
     use kobo_sdk::{Context, KoboApp, StoreResult};
 
     #[test]
@@ -1250,6 +1288,21 @@ mod tests {
         .expect("valid job response");
         assert_eq!(job.kind, "return");
         assert_eq!(job.state, "returned");
+    }
+
+    #[test]
+    fn labels_turn_catalog_values_into_reader_copy() {
+        assert_eq!(kind_label("return"), "Return");
+        assert_eq!(
+            availability_label(&Source {
+                handle: "opaque".to_owned(),
+                catalog: "montreal".to_owned(),
+                catalog_name: "Montréal".to_owned(),
+                availability: "available".to_owned(),
+                available: true,
+            }),
+            "Available now"
+        );
     }
 
     #[test]
