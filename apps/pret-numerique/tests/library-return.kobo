@@ -4,6 +4,14 @@ clean
 tap Library
 wait-for My loans
 expect All
+tap BAnQ
+expect My loans
+tap Fixture BAnQ title
+wait-for Return loan
+expect Return this loan
+expect BAnQ
+tap Keep loan
+wait-for My loans
 tap Montréal
 expect My loans
 tap Fixture return title
