@@ -207,6 +207,13 @@ const AUDIOBOOK_VOICES: [&str; 6] = [
 /// hardware. That is the one thing this project is arranged to avoid.
 #[must_use]
 pub fn credential_allowed(app: &str, credential: &Credential, url: &str) -> bool {
+    if app == "pret-numerique" {
+        return matches!(
+            (&*credential.secret, &credential.header),
+            ("pret-numerique-api", SecretHeader::Bearer)
+        ) && url.starts_with("https://home.lapal.me:3300/pret/v1/")
+            && has_origin(url, "home.lapal.me", 3300);
+    }
     if app == "audiobook" {
         return match (&*credential.secret, &credential.header) {
             ("exa", SecretHeader::Named(header)) => {
@@ -1206,6 +1213,47 @@ mod tests {
             ("chat", "https://attacker.invalid/collect"),
         ] {
             assert!(!super::credential_allowed(app, &openai, url));
+        }
+    }
+
+    #[test]
+    fn pret_numerique_credentials_are_bound_to_the_proxy_origin() {
+        use kobo_protocol::Credential;
+
+        let token = Credential::bearer("pret-numerique-api");
+        assert!(super::credential_allowed(
+            "pret-numerique",
+            &token,
+            "https://home.lapal.me:3300/pret/v1/health"
+        ));
+        for (app, credential, url) in [
+            (
+                "other",
+                Credential::bearer("pret-numerique-api"),
+                "https://home.lapal.me:3300/pret/v1/health",
+            ),
+            (
+                "pret-numerique",
+                Credential::in_header("pret-numerique-api", "x-api-key"),
+                "https://home.lapal.me:3300/pret/v1/health",
+            ),
+            (
+                "pret-numerique",
+                Credential::bearer("pret-numerique-api"),
+                "https://home.lapal.me:3301/pret/v1/health",
+            ),
+            (
+                "pret-numerique",
+                Credential::bearer("pret-numerique-api"),
+                "https://home.lapal.me.attacker.invalid:3300/pret/v1/health",
+            ),
+            (
+                "pret-numerique",
+                Credential::bearer("pret-numerique-api"),
+                "https://home.lapal.me:3300/other/collect",
+            ),
+        ] {
+            assert!(!super::credential_allowed(app, &credential, url));
         }
     }
 

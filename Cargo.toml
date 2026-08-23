@@ -48,6 +48,7 @@ members = [
     "examples/store",
     "apps/arxiv",
     "apps/morse",
+    "apps/pret-numerique",
     "apps/sudoku",
     "tools/icon-import",
 ]

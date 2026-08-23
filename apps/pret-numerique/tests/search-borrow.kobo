@@ -1,0 +1,18 @@
+# Fixture-backed happy path. The proxy fixture should return an available
+# Montréal result whose title is "Dune".
+clean
+tap Title, author, or ISBN
+type dune
+tap Search
+wait-for Results
+expect Results
+tap Dune
+wait-for Book details
+expect Book details
+tap Montréal
+wait-for Confirm borrow
+expect Confirm borrow
+expect Nothing is downloaded
+tap Borrow & send
+wait-for Queue
+expect Queue

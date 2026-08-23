@@ -1,0 +1,15 @@
+# Fixture-backed return path. Seed one stored Montréal loan titled
+# "Fixture return title" before running this script.
+clean
+tap Library
+wait-for My loans
+expect All
+tap Montréal
+expect My loans
+tap Fixture return title
+wait-for Return loan
+expect Return this loan
+expect saved LCPL
+tap Return loan
+wait-for Queue
+expect Queue

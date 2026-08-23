@@ -613,6 +613,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kobo-pret-numerique"
+version = "0.2.6"
+dependencies = [
+ "kobo-json",
+ "kobo-sdk",
+ "kobo-ui",
+]
+
+[[package]]
 name = "kobo-profile"
 version = "0.2.6"
 

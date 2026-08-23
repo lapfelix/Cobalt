@@ -1,0 +1,10 @@
+# The simulator's offline scenario exercises the proxy health error path.
+clean
+scenario offline
+tap Settings
+wait-for Proxy settings
+expect Proxy settings
+tap Check proxy health
+wait-for not on a network
+expect not on a network
+scenario normal

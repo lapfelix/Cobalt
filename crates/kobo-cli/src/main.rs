@@ -56,6 +56,7 @@ const INSTALLED_PACKAGES: &[(&str, Option<&str>)] = &[
     ("kobo-settings", None),
     ("kobo-sidekick", None),
     ("kobo-store", None),
+    ("kobo-pret-numerique", None),
 ];
 /// Applications released through Store, including the initial built-in copies
 /// that users can update, remove and reinstall independently of Cobalt.

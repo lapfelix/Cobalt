@@ -68,6 +68,14 @@ const ENTRIES: &[Entry] = &[
         needs: "Runs commands on this device. Nothing it does survives a reboot.",
         glyph: Glyph::Terminal,
     },
+    Entry {
+        name: "pret-numerique",
+        title: "Prêt numérique",
+        label: "Library loans",
+        summary: "Search Montréal and BAnQ; borrow and return through your home proxy.",
+        needs: "Uses Wi-Fi and the installed pret-numerique-api secret. No book is saved here.",
+        glyph: Glyph::Book,
+    },
 ];
 
 #[derive(Default)]
