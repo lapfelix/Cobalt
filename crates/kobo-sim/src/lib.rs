@@ -2072,6 +2072,7 @@ pub fn run_server_at(address: &str) -> io::Result<()> {
 /// for, mirroring the device directory without ever handing one to the
 /// application.
 const SIM_SECRETS: &str = "cobalt-sim-secrets";
+const SIM_SECRETS_DIRECTORY: &str = "KOBO_SIM_SECRETS_DIR";
 
 /// Enables the deterministic Prêt numérique API used by the Kobo drive
 /// scripts. It is opt-in so the normal simulator remains an honest client of
@@ -2143,6 +2144,9 @@ fn simulated_tasks(name: &str) -> TaskRunner {
 /// deliberately not a library token; the fixture only proves that the
 /// runtime resolves the Kobo secret and supplies it to the backend.
 fn simulator_secrets_directory() -> PathBuf {
+    if let Some(directory) = std::env::var_os(SIM_SECRETS_DIRECTORY) {
+        return PathBuf::from(directory);
+    }
     let directory = std::env::temp_dir().join(format!("{SIM_SECRETS}-{}", std::process::id()));
     if std::env::var_os(PRET_NUMERIQUE_FIXTURE).is_some() {
         let _ = fs::create_dir_all(&directory);
