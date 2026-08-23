@@ -17,6 +17,7 @@ const API: &str = "https://home.lapal.me:3300/pret/v1";
 const API_SECRET: &str = "pret-numerique-api";
 const STORE_STATE: &str = "ui-state";
 const MAX_RESULTS: usize = 40;
+const MAX_QUERY_CHARS: usize = 80;
 const MAX_JOBS: usize = 24;
 const SEARCH: &str = "search-tab";
 const LIBRARY: &str = "library-tab";
@@ -236,13 +237,13 @@ impl PretNumerique {
         if self.entry.is_open() {
             return ScreenBuilder::new("search-input")
                 .top_bar("Search")
-                .text_entry(&self.entry, "Search Montréal and BAnQ", "Search")
+                .text_entry(&self.entry, "Search the libraries", "Search")
                 .build();
         }
         let mut screen = Self::nav(ScreenBuilder::new("search").top_bar("Prêt numérique"), 0);
         screen = screen
             .heading("Find a book")
-            .text("Search both library catalogues. The proxy handles the loan and keeps the LCPL at home.")
+            .text("Borrow from Montréal or BAnQ. Books stay on your home server.")
             .field(EDIT_QUERY, self.query.clone(), "Title, author, or ISBN")
             .field_clear(EDIT_QUERY)
             .chips([
@@ -265,7 +266,11 @@ impl PretNumerique {
     fn results_screen(&self) -> Screen {
         let mut screen = Self::nav(ScreenBuilder::new("results").top_bar("Results"), 0);
         screen = screen
-            .heading(format!("{} · {}", self.filter.label(), self.query))
+            .heading(format!(
+                "{} · {}",
+                self.filter.label(),
+                compact_message(&self.query, 56)
+            ))
             .top_bar_action(REFRESH, "Refresh");
         if self.loading {
             return screen.skeleton(6).build();
@@ -285,7 +290,6 @@ impl PretNumerique {
                 } else {
                     "Not currently available"
                 };
-                let isbn = result.isbn.as_deref().unwrap_or("ISBN not listed");
                 let goodreads = result
                     .goodreads_rating
                     .map(|rating| format!(" · Goodreads {rating:.1}/5"))
@@ -294,7 +298,7 @@ impl PretNumerique {
                     format!("result.{index}"),
                     result.title.clone(),
                     format!(
-                        "{} · ISBN: {isbn} · {catalogs} · {availability}{goodreads}",
+                        "{} · {catalogs} · {availability}{goodreads}",
                         author_line(&result.authors),
                     ),
                     Glyph::Book,
@@ -314,18 +318,23 @@ impl PretNumerique {
         let Some(result) = self.results.get(index) else {
             return self.results_screen();
         };
-        let mut screen = Self::nav(ScreenBuilder::new("detail").top_bar("Book details"), 0)
-            .heading(result.title.clone())
-            .facts([
-                ("Author", author_line(&result.authors)),
-                (
-                    "ISBN",
-                    result
-                        .isbn
-                        .clone()
-                        .unwrap_or_else(|| "Not listed".to_owned()),
-                ),
-            ]);
+        let mut screen = Self::nav(
+            ScreenBuilder::new("detail")
+                .top_bar("Book details")
+                .top_bar_action(BACK, "Back"),
+            0,
+        )
+        .heading(result.title.clone())
+        .facts([
+            ("Author", author_line(&result.authors)),
+            (
+                "ISBN",
+                result
+                    .isbn
+                    .clone()
+                    .unwrap_or_else(|| "Not listed".to_owned()),
+            ),
+        ]);
         if let Some(description) = &result.description {
             screen = screen.section("About this book").text(description.clone());
         }
@@ -383,12 +392,14 @@ impl PretNumerique {
         let source = result.sources.get(self.selected_source);
         let library = source.map_or("selected library", |source| source.catalog_name.as_str());
         Self::nav(
-            ScreenBuilder::new("confirm-borrow").top_bar("Confirm borrow"),
+            ScreenBuilder::new("confirm-borrow")
+                .top_bar("Confirm borrow")
+                .top_bar_action(CANCEL, "Cancel"),
             0,
         )
         .heading("Borrow and send?")
         .text(format!(
-            "{}\n{}\n\nThe LCPL stays on the home server. Nothing is downloaded to this Kobo.",
+            "{}\n{}\n\nThe book will be saved on your home server. Nothing is downloaded to this Kobo.",
             result.title, library
         ))
         .buttons([(CONFIRM_BORROW, "Borrow & send"), (CANCEL, "Cancel")])
@@ -442,14 +453,16 @@ impl PretNumerique {
             return self.library_screen();
         };
         Self::nav(
-            ScreenBuilder::new("confirm-return").top_bar("Return loan"),
+            ScreenBuilder::new("confirm-return")
+                .top_bar("Return loan")
+                .top_bar_action(CANCEL, "Cancel"),
             1,
         )
-        .heading("Return this loan?")
+        .heading("Return this book?")
         .text(format!(
-            "{}\n{}\n\nThe proxy will call the {} return service once. The saved LCPL is removed only after the library confirms the return.",
+            "{}\n{}\n\nThe loan stays on your home server until {} confirms the return.",
             book.title,
-            book.file_name,
+            catalog_label(&book.catalog),
             catalog_label(&book.catalog)
         ))
         .buttons([(CONFIRM_RETURN, "Return loan"), (CANCEL, "Keep loan")])
@@ -459,27 +472,18 @@ impl PretNumerique {
     fn queue_screen(&self) -> Screen {
         let mut screen = Self::nav(ScreenBuilder::new("queue").top_bar("Queue"), 2)
             .top_bar_action(REFRESH, "Refresh")
-            .heading("Server queue");
+            .heading("Your requests");
         if self.loading {
-            return screen.activity("Checking the proxy…", None).build();
+            return screen.activity("Checking the proxy...", None).build();
         }
         if self.jobs.is_empty() {
             screen = screen.empty_state("No borrow or return jobs yet.");
         } else {
             screen = screen.rows_with_menu(self.jobs.iter().enumerate().map(|(index, job)| {
-                let state = state_label(&job.state);
-                let state = job.error.as_deref().map_or_else(
-                    || state.to_owned(),
-                    |error| format!("{state} · {}", compact_message(error, 120)),
-                );
                 (
                     format!("job.{index}"),
                     job.title.clone(),
-                    format!(
-                        "{} · {} · {state}",
-                        catalog_label(&job.catalog),
-                        kind_label(&job.kind)
-                    ),
+                    job_summary(job),
                     Glyph::Circle,
                     if job.state == "hook_failed" {
                         format!("retry-hook.{index}")
@@ -497,13 +501,13 @@ impl PretNumerique {
 
     fn settings_screen(&self) -> Screen {
         let mut screen = Self::nav(ScreenBuilder::new("settings").top_bar("Settings"), 3)
-            .heading("Proxy settings")
+            .heading("Connection")
             .facts([
-                ("Proxy", self.health.as_deref().unwrap_or("Not checked")),
-                ("LCPL storage", "Home server only"),
-                ("Credentials", "Never sent to Kobo"),
+                ("Libraries", self.health.as_deref().unwrap_or("Not checked")),
+                ("Book files", "Home server only"),
+                ("Library passwords", "Never sent to Kobo"),
             ])
-            .button(REFRESH, "Check proxy health");
+            .button(REFRESH, "Check connection");
         if let Some(note) = &self.note {
             screen = screen.banner(BannerLevel::Info, note.clone());
         }
@@ -526,13 +530,14 @@ impl PretNumerique {
         if self.inflight.is_some() {
             return;
         }
-        let query = self.query.trim().to_owned();
+        let query: String = self.query.trim().chars().take(MAX_QUERY_CHARS).collect();
         if query.is_empty() {
             self.note = Some("Enter a title, author, or ISBN.".to_owned());
             self.view = View::Search;
             self.show(context);
             return;
         }
+        query.clone_into(&mut self.query);
         let catalogs = Value::Array(
             self.filter
                 .catalog_values()
@@ -822,15 +827,15 @@ impl PretNumerique {
                         self.loading = false;
                         self.note = Some(match kind {
                             RequestKind::Borrow => {
-                                "The server accepted the borrow. The LCPL stays at home; nothing was downloaded to this Kobo."
+                                "Borrow request sent. The book will be saved on your home server."
                                     .to_owned()
                             }
                             RequestKind::Return => {
-                                "The server accepted the return. This Kobo never held the LCPL."
+                                "Return request sent. The book stays saved until the library confirms."
                                     .to_owned()
                             }
                             RequestKind::RetryHook => {
-                                "The server accepted the hook retry. The LCPL stays on the home server."
+                                "Send retry started. The book stays on your home server."
                                     .to_owned()
                             }
                             _ => "The server accepted the request.".to_owned(),
@@ -1057,8 +1062,15 @@ fn author_line(authors: &[String]) -> String {
 fn compact_message(message: &str, limit: usize) -> String {
     let mut compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.chars().count() > limit {
-        compact = compact.chars().take(limit.saturating_sub(1)).collect();
-        compact.push('…');
+        let suffix = "...";
+        if limit <= suffix.chars().count() {
+            return suffix.chars().take(limit).collect();
+        }
+        compact = compact
+            .chars()
+            .take(limit.saturating_sub(suffix.chars().count()))
+            .collect();
+        compact.push_str(suffix);
     }
     compact
 }
@@ -1087,7 +1099,24 @@ fn kind_label(kind: &str) -> &str {
     match kind {
         "borrow" => "Borrow",
         "return" => "Return",
-        _ => kind,
+        "import" => "Send",
+        _ => "Request",
+    }
+}
+
+fn job_summary(job: &Job) -> String {
+    let prefix = format!(
+        "{} · {}",
+        catalog_label(&job.catalog),
+        kind_label(&job.kind)
+    );
+    match job.state.as_str() {
+        "auth_required" => format!("{prefix} · Sign-in needed on the home server"),
+        "hook_failed" => format!("{prefix} · Could not send · open the menu to retry"),
+        "borrow_uncertain" => format!("{prefix} · Check the library account before retrying"),
+        "return_failed" => format!("{prefix} · Return failed · loan kept"),
+        "return_uncertain" => format!("{prefix} · Return uncertain · check the account"),
+        _ => format!("{prefix} · {}", state_label(&job.state)),
     }
 }
 
@@ -1111,19 +1140,19 @@ fn availability_label(source: &Source) -> String {
 
 fn state_label(state: &str) -> &str {
     match state {
-        "auth_required" => "Authentication needed",
-        "borrowing" => "Borrowing…",
-        "downloading" => "Saving LCPL…",
+        "auth_required" => "Sign-in needed",
+        "borrowing" => "Borrowing...",
+        "downloading" => "Saving book...",
         "stored" => "Saved on server",
-        "hook_running" => "Sending…",
-        "complete" => "Complete",
-        "hook_failed" => "Send failed · retry on queue",
-        "borrow_uncertain" => "Borrow uncertain · check account",
-        "returning" => "Returning…",
+        "hook_running" => "Sending...",
+        "complete" => "Ready on server",
+        "hook_failed" => "Could not send",
+        "borrow_uncertain" => "Check account before retrying",
+        "returning" => "Returning...",
         "returned" => "Returned",
         "return_failed" => "Return failed · loan retained",
         "return_uncertain" => "Return uncertain · check account",
-        "failed" => "Failed",
+        "failed" => "Could not finish",
         _ => state,
     }
 }
@@ -1422,6 +1451,7 @@ mod tests {
     #[test]
     fn labels_turn_catalog_values_into_reader_copy() {
         assert_eq!(kind_label("return"), "Return");
+        assert_eq!(kind_label("import"), "Send");
         assert_eq!(
             availability_label(&Source {
                 handle: "opaque".to_owned(),
@@ -1442,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_rows_keep_a_bounded_server_error_visible() {
+    fn queue_rows_use_child_friendly_failure_copy() {
         let app = PretNumerique {
             view: View::Queue,
             jobs: vec![Job {
@@ -1456,13 +1486,13 @@ mod tests {
             ..PretNumerique::default()
         };
         let screen = format!("{:?}", app.queue_screen());
-        assert!(screen.contains("Failed · The server returned a very long"));
+        assert!(screen.contains("Montréal · Borrow · Could not finish"));
         assert!(!screen.contains("unbounded layout line"));
     }
 
     #[test]
-    fn compact_message_collapses_whitespace_and_adds_an_ellipsis() {
-        assert_eq!(compact_message("one\n two   three", 12), "one two thr…");
+    fn compact_message_collapses_whitespace_and_adds_an_ascii_ellipsis() {
+        assert_eq!(compact_message("one\n two   three", 12), "one two t...");
         assert_eq!(compact_message("short", 20), "short");
     }
 
@@ -1484,7 +1514,7 @@ mod tests {
         assert!(library.contains("BAnQ"));
         assert!(library.contains("Fixture loan"));
         let confirmation = format!("{:?}", app.confirm_return_screen());
-        assert!(confirmation.contains("Return this loan?"));
+        assert!(confirmation.contains("Return this book?"));
         assert!(confirmation.contains("BAnQ"));
         app.filter = super::CatalogFilter::Montreal;
         assert!(!format!("{:?}", app.library_screen()).contains("Fixture loan"));

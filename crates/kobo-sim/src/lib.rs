@@ -2196,7 +2196,9 @@ fn pret_fixture_post(
     };
     let request_text = String::from_utf8_lossy(request_body).to_ascii_lowercase();
     let body: &[u8] = if path == "/search" {
-        if request_text.contains("hamlet") {
+        if request_text.contains("nonsense") {
+            br#"{"results":[],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#
+        } else if request_text.contains("hamlet") {
             r#"{"results":[{"title":"Hamlet","authors":["William Shakespeare"],"isbn":"9780743477123","description":"A prince confronts grief, betrayal, and the cost of revenge in Shakespeare's tragedy.","goodreads_rating":4.02,"goodreads_ratings_count":900000,"goodreads_reviews_count":32000,"sources":[{"handle":"fixture-hamlet-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"On loan","is_available":false},{"handle":"fixture-hamlet-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
         } else if request_text.contains("earthsea") {
             r#"{"results":[{"title":"A Wizard of Earthsea","authors":["Ursula K. Le Guin"],"isbn":"9780547773742","description":"Ged, a gifted young wizard, learns that true power begins with knowing the shadow within himself.","goodreads_rating":4.25,"goodreads_ratings_count":430000,"goodreads_reviews_count":21000,"sources":[{"handle":"fixture-earthsea-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-earthsea-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"On loan","is_available":false}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()

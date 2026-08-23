@@ -3,6 +3,6 @@
 clean
 scenario normal
 tap Queue
-wait-for Server queue
-expect Authentication needed
-expect Send failed
+wait-for Your requests
+expect Sign-in needed
+expect Could not send

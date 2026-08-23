@@ -2,9 +2,9 @@
 clean
 scenario offline
 tap Settings
-wait-for Proxy settings
-expect Proxy settings
-tap Check proxy health
+wait-for Connection
+expect Connection
+tap Check connection
 wait-for not on a network
 expect not on a network
 scenario normal
