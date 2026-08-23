@@ -189,7 +189,7 @@ impl PretNumerique {
             return;
         };
         let mut lines = text.lines();
-        self.query = lines.next().unwrap_or_default().to_owned();
+        lines.next().unwrap_or_default().clone_into(&mut self.query);
         self.job_ids = lines
             .filter(|line| !line.trim().is_empty())
             .take(MAX_JOBS)
@@ -216,7 +216,7 @@ impl PretNumerique {
         context.set_screen(screen);
     }
 
-    fn nav(&self, screen: ScreenBuilder, selected: usize) -> ScreenBuilder {
+    fn nav(screen: ScreenBuilder, selected: usize) -> ScreenBuilder {
         screen.nav_bar(
             Some(selected),
             [
@@ -235,7 +235,7 @@ impl PretNumerique {
                 .text_entry(&self.entry, "Search Montréal and BAnQ", "Search")
                 .build();
         }
-        let mut screen = self.nav(ScreenBuilder::new("search").top_bar("Prêt numérique"), 0);
+        let mut screen = Self::nav(ScreenBuilder::new("search").top_bar("Prêt numérique"), 0);
         screen = screen
             .heading("Find a book")
             .text("Search both library catalogues. The proxy handles the loan and keeps the LCPL at home.")
@@ -259,7 +259,7 @@ impl PretNumerique {
     }
 
     fn results_screen(&self) -> Screen {
-        let mut screen = self.nav(ScreenBuilder::new("results").top_bar("Results"), 0);
+        let mut screen = Self::nav(ScreenBuilder::new("results").top_bar("Results"), 0);
         screen = screen
             .heading(format!("{} · {}", self.filter.label(), self.query))
             .top_bar_action(REFRESH, "Refresh");
@@ -306,8 +306,7 @@ impl PretNumerique {
         let Some(result) = self.results.get(index) else {
             return self.results_screen();
         };
-        let mut screen = self
-            .nav(ScreenBuilder::new("detail").top_bar("Book details"), 0)
+        let mut screen = Self::nav(ScreenBuilder::new("detail").top_bar("Book details"), 0)
             .heading(result.title.clone())
             .facts([
                 ("Author", author_line(&result.authors)),
@@ -354,10 +353,8 @@ impl PretNumerique {
             return self.results_screen();
         };
         let source = result.sources.get(self.selected_source);
-        let library = source
-            .map(|source| source.catalog_name.as_str())
-            .unwrap_or("selected library");
-        self.nav(
+        let library = source.map_or("selected library", |source| source.catalog_name.as_str());
+        Self::nav(
             ScreenBuilder::new("confirm-borrow").top_bar("Confirm borrow"),
             0,
         )
@@ -371,8 +368,7 @@ impl PretNumerique {
     }
 
     fn library_screen(&self) -> Screen {
-        let mut screen = self
-            .nav(ScreenBuilder::new("library").top_bar("My loans"), 1)
+        let mut screen = Self::nav(ScreenBuilder::new("library").top_bar("My loans"), 1)
             .chips([
                 (FILTER_ALL, "All", self.filter == CatalogFilter::All),
                 (
@@ -417,7 +413,7 @@ impl PretNumerique {
         let Some(book) = books.get(index) else {
             return self.library_screen();
         };
-        self.nav(
+        Self::nav(
             ScreenBuilder::new("confirm-return").top_bar("Return loan"),
             1,
         )
@@ -433,8 +429,7 @@ impl PretNumerique {
     }
 
     fn queue_screen(&self) -> Screen {
-        let mut screen = self
-            .nav(ScreenBuilder::new("queue").top_bar("Queue"), 2)
+        let mut screen = Self::nav(ScreenBuilder::new("queue").top_bar("Queue"), 2)
             .top_bar_action(REFRESH, "Refresh")
             .heading("Server queue");
         if self.loading {
@@ -469,8 +464,7 @@ impl PretNumerique {
     }
 
     fn settings_screen(&self) -> Screen {
-        let mut screen = self
-            .nav(ScreenBuilder::new("settings").top_bar("Settings"), 3)
+        let mut screen = Self::nav(ScreenBuilder::new("settings").top_bar("Settings"), 3)
             .heading("Proxy settings")
             .facts([
                 ("Proxy", self.health.as_deref().unwrap_or("Not checked")),
@@ -727,6 +721,7 @@ impl PretNumerique {
         }
     }
 
+    #[allow(clippy::single_match_else)]
     fn handle_completed(&mut self, context: &mut Context, kind: RequestKind, body: &[u8]) {
         match kind {
             RequestKind::Search => match parse_search(body) {
@@ -826,14 +821,12 @@ impl PretNumerique {
 
     fn back(&mut self, context: &mut Context) {
         self.view = match self.view {
-            View::Search => View::Search,
-            View::Results => View::Search,
+            View::Search | View::Results | View::Library | View::Queue | View::Settings => {
+                View::Search
+            }
             View::Detail => View::Results,
             View::ConfirmBorrow => View::Detail,
-            View::Library => View::Search,
             View::ConfirmReturn => View::Library,
-            View::Queue => View::Search,
-            View::Settings => View::Search,
         };
         self.note = None;
         self.show(context);
@@ -854,6 +847,7 @@ impl KoboApp for PretNumerique {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn on_action(&mut self, context: &mut Context, action: kobo_sdk::ActionId) {
         if let Some(event) = self.entry.handle(action) {
             if let Typing::Submitted(value) = event {
@@ -941,7 +935,6 @@ impl KoboApp for PretNumerique {
             self.view = View::Detail;
             self.note = None;
             self.show(context);
-            return;
         }
         if let Some(index) = self.selected_result.and_then(|result_index| {
             self.results
@@ -969,7 +962,6 @@ impl KoboApp for PretNumerique {
             self.view = View::ConfirmReturn;
             self.note = None;
             self.show(context);
-            return;
         }
     }
 
