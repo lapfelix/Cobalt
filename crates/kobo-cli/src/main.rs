@@ -1325,7 +1325,7 @@ fn build_device(device: bool) -> Result<(), String> {
     command.args(["build", "--release"]);
     if device {
         let linker = find_rust_lld()?;
-        command.env("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER", linker);
+        configure_device_toolchain(&mut command, &linker);
         // Rust code needs no C compiler, but `ring` carries assembly and C
         // that cc-rs builds itself, and cc-rs looks for a tool named after the
         // target and then gives up with a message about a name nobody has
@@ -2124,7 +2124,13 @@ fn device_build_command(package: &str, features: Option<&str>) -> Result<Command
             "--bin",
             package,
         ])
-        .env("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER", linker);
+        .env(
+            "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER",
+            &linker,
+        );
+    if let Some(rustc) = rustc_for_linker(&linker) {
+        command.env("RUSTC", rustc);
+    }
     if std::env::var_os("CC_armv7_unknown_linux_musleabihf").is_none() {
         command.env("CC_armv7_unknown_linux_musleabihf", find_device_cc()?);
     }
@@ -4002,28 +4008,55 @@ impl Drop for SimulationGuard {
 }
 
 fn find_rust_lld() -> Result<PathBuf, String> {
-    let output = Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .map_err(|error| format!("locate Rust sysroot: {error}"))?;
-    if !output.status.success() {
-        return Err("rustc --print sysroot failed".to_owned());
-    }
-    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let rustlib = root.join("lib/rustlib");
-    for entry in
-        fs::read_dir(&rustlib).map_err(|error| format!("read {}: {error}", rustlib.display()))?
-    {
-        let candidate = entry
-            .map_err(|error| error.to_string())?
-            .path()
-            .join("bin/rust-lld");
-        if candidate.is_file() {
-            return Ok(candidate);
+    let mut rustc_commands = vec![PathBuf::from("rustc")];
+    // Homebrew's Rust package and rustup can coexist. If the active `rustc`
+    // has no bundled linker, ask rustup for the installed toolchain instead of
+    // requiring every caller to repair PATH by hand.
+    if let Ok(output) = Command::new("rustup").args(["which", "rustc"]).output() {
+        if output.status.success() {
+            let rustc = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if !rustc.as_os_str().is_empty() && !rustc_commands.contains(&rustc) {
+                rustc_commands.push(rustc);
+            }
         }
     }
-    Err("rust-lld was not found in the active Rust toolchain".to_owned())
+    for rustc in rustc_commands {
+        let output = Command::new(&rustc)
+            .args(["--print", "sysroot"])
+            .output()
+            .map_err(|error| format!("locate Rust sysroot: {error}"))?;
+        if !output.status.success() {
+            continue;
+        }
+        let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let rustlib = root.join("lib/rustlib");
+        let Ok(entries) = fs::read_dir(&rustlib) else {
+            continue;
+        };
+        for entry in entries {
+            let candidate = entry
+                .map_err(|error| error.to_string())?
+                .path()
+                .join("bin/rust-lld");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err("rust-lld was not found in the active Rust or rustup toolchain".to_owned())
+}
+
+fn rustc_for_linker(linker: &Path) -> Option<PathBuf> {
+    let sysroot = linker.parent()?.parent()?.parent()?.parent()?.parent()?;
+    let rustc = sysroot.join("bin/rustc");
+    rustc.is_file().then_some(rustc)
+}
+
+fn configure_device_toolchain(command: &mut Command, linker: &Path) {
+    command.env("CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER", linker);
+    if let Some(rustc) = rustc_for_linker(linker) {
+        command.env("RUSTC", rustc);
+    }
 }
 
 /// The C cross-compiler `ring` needs to build its own sources for the reader.
