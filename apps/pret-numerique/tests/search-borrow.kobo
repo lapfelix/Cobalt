@@ -12,7 +12,7 @@ expect Book details
 tap Montréal
 wait-for Confirm borrow
 expect Confirm borrow
-expect Nothing is downloaded
+expect The LCPL stays on the home server. Nothing is downloaded
 tap Borrow & send
 wait-for Queue
 expect Queue
