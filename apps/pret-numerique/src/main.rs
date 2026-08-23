@@ -267,11 +267,8 @@ impl PretNumerique {
     fn results_screen(&self) -> Screen {
         let mut screen = Self::nav(ScreenBuilder::new("results").top_bar("Results"), 0);
         screen = screen
-            .heading(format!(
-                "{} · {}",
-                self.filter.label(),
-                compact_message(&self.query, 56)
-            ))
+            .heading(self.filter.label())
+            .text(format!("Search: {}", compact_message(&self.query, 56)))
             .top_bar_action(REFRESH, "Refresh");
         if self.loading {
             return screen.skeleton(6).build();
