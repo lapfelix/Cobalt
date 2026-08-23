@@ -20,8 +20,8 @@ Read-only doctor, the physical touch transform, the GC16 refresh, the
 reversible pixel restore, and the whole-screen snapshot/restore now match the
 observed reader. The N506 also uses the older 68-byte NTX `mxc_epdc_fb` update
 ABI; the display layer has a separate implementation for it. All attended
-display, touch, recovery, and handoff evidence is complete, but `write_ready`
-remains false pending explicit review and enablement.
+display, touch, recovery, and handoff evidence is complete, and `write_ready`
+is now enabled for this exact N506 identity.
 
 For a repeat probe:
 
@@ -37,10 +37,9 @@ firmware, kernel, and device code. Compare all fields against the
 `DeviceProfile` validation in `crates/kobo-profile/src/lib.rs`.
 
 The profile is covered by profile/layout tests and the touch and display
-evidence is recorded from the physical probe. Keep `write_ready: false` until
-the evidence has been reviewed on that same reader and ordinary writes are
-deliberately enabled. Then install the package and run the app smoke tests on
-the Clara 2E.
+evidence is recorded from the physical probe. The profile is write-ready only
+for this exact N506 identity and firmware; install the package and run the app
+smoke tests on the Clara 2E.
 
 The Prêt numérique app itself remains safe to develop without this profile:
 its network/UI code can be checked in the host workspace, but no device

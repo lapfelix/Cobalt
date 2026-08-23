@@ -109,9 +109,8 @@ pub const ELIPSA_2E_389: DeviceProfile = DeviceProfile {
 /// Read-only profile measured on the Prêt numérique Clara 2E.
 ///
 /// The identity and geometry come from `kobo doctor` on the physical N506.
-/// All owner-attended display, touch, recovery, and handoff evidence is now
-/// complete; `write_ready` stays false until that evidence is explicitly
-/// reviewed and ordinary runtime writes are deliberately enabled.
+/// Owner-attended display, touch, recovery, and handoff evidence was completed
+/// on that same reader before this profile was marked write-ready.
 pub const CLARA_2E_N506: DeviceProfile = DeviceProfile {
     id: "clara-2e-n506-386",
     model: "Kobo Clara 2E",
@@ -161,7 +160,7 @@ pub const CLARA_2E_N506: DeviceProfile = DeviceProfile {
     serial_prefix: "N506",
     firmware_version: "4.38.23697",
     kernel_release: "4.1.15",
-    write_ready: false,
+    write_ready: true,
 };
 
 pub const SUPPORTED_PROFILES: &[&DeviceProfile] = &[&CLARA_BW_391, &ELIPSA_2E_389, &CLARA_2E_N506];
@@ -779,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn clara_2e_n506_matches_the_measured_probe_but_blocks_writes() {
+    fn clara_2e_n506_matches_the_measured_probe_and_is_write_ready() {
         let snapshot = DeviceSnapshot {
             compatible: vec!["fsl,imx6sll-lpddr3-arm2".into(), "fsl,imx6sll".into()],
             model: Some("Freescale i.MX6SLL NTX Board".into()),
@@ -835,9 +834,9 @@ mod tests {
             },
         };
         let report = CLARA_2E_N506.validate(&snapshot);
-        assert_eq!(report.readiness, Readiness::ReadOnlyMatched);
+        assert_eq!(report.readiness, Readiness::WriteReady);
         assert!(report.mismatches.is_empty());
-        assert_eq!(report.write_blockers, vec![WRITE_EVIDENCE_PENDING]);
+        assert!(report.write_blockers.is_empty());
         assert_eq!(
             super::identify_profile(&snapshot).map(|profile| profile.id),
             Some("clara-2e-n506-386")
