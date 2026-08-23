@@ -19,7 +19,21 @@ on `.202`.
 ## Drive scripts
 
 The scripts in `tests/` are intended for `kobo drive` against a running
-Prêt numérique simulator and a deterministic proxy fixture. The fixture-backed
-scripts document the expected title/job names in their comments; they do not
-make real catalog or borrowing calls. `queue-offline.kobo` can run without
-catalog fixtures and verifies the offline health presentation.
+Prêt numérique simulator and a deterministic proxy fixture. Start that fixture
+with the measured Clara 2E profile from the app directory:
+
+```text
+KOBO_SIM_PROFILE=n506 KOBO_SIM_PRET_NUMERIQUE_FIXTURE=1 \
+  ../../target/debug/kobo dev 127.0.0.1:8787
+```
+
+Then run, for example:
+
+```text
+../../target/debug/kobo drive --address 127.0.0.1:8787 \
+  --script tests/library-return.kobo
+```
+
+The fixture uses a dummy named API secret and never makes real catalog or
+borrowing calls. `queue-offline.kobo` deliberately switches the simulator to
+offline mode and verifies the network error presentation.

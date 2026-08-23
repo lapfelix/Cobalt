@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use kobo_policy::{shelf::Shelf, store::Store, DeviceServices, TaskRunner};
-use kobo_profile::{DeviceProfile, CLARA_BW_391};
+use kobo_profile::{DeviceProfile, CLARA_2E_N506, CLARA_BW_391};
 use kobo_protocol::{read_from, write_to, Frame, Lifecycle, Message};
 use kobo_ui::{
     ActionId, DisplayMetrics, FramePlanner, FrameTransition, Node, NodeId, PanelWaveform, Screen,
@@ -21,13 +21,20 @@ use kobo_ui::{
 };
 
 const MAX_HTTP_HEADER: usize = 8 * 1024;
-const PROFILE: &DeviceProfile = &CLARA_BW_391;
+type SimCredentialPolicy = dyn Fn(&kobo_protocol::Credential, &str) -> bool + Send + Sync;
+
+fn selected_profile() -> &'static DeviceProfile {
+    match std::env::var("KOBO_SIM_PROFILE").as_deref() {
+        Ok("n506" | "clara-2e-n506-386") => &CLARA_2E_N506,
+        _ => &CLARA_BW_391,
+    }
+}
 
 fn profile_metrics() -> DisplayMetrics {
     DisplayMetrics {
-        width: i32::try_from(PROFILE.width).unwrap_or(i32::MAX),
-        height: i32::try_from(PROFILE.height).unwrap_or(i32::MAX),
-        pixels_per_inch: i32::from(PROFILE.pixels_per_inch),
+        width: i32::try_from(selected_profile().width).unwrap_or(i32::MAX),
+        height: i32::try_from(selected_profile().height).unwrap_or(i32::MAX),
+        pixels_per_inch: i32::from(selected_profile().pixels_per_inch),
         text_scale: kobo_ui::display_metrics_from_env().text_scale,
     }
 }
@@ -106,8 +113,8 @@ struct PanelPreview {
 
 impl PanelPreview {
     fn new() -> Self {
-        let width = PROFILE.width as usize;
-        let height = PROFILE.height as usize;
+        let width = selected_profile().width as usize;
+        let height = selected_profile().height as usize;
         let pixels = width.saturating_mul(height);
         Self {
             planner: FramePlanner::new(width, height),
@@ -238,7 +245,10 @@ impl Simulator {
     }
 
     fn render_frame(&mut self, ideal: bool) -> Vec<u8> {
-        let mut surface = Surface::new(PROFILE.width as usize, PROFILE.height as usize);
+        let mut surface = Surface::new(
+            selected_profile().width as usize,
+            selected_profile().height as usize,
+        );
         kobo_ui::render_with(
             &self.screen,
             &profile_metrics(),
@@ -252,8 +262,8 @@ impl Simulator {
 
     pub fn touch(&mut self, x: i32, y: i32) -> Option<ActionId> {
         let (display_x, display_y) = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
-        let raw = PROFILE.display_to_touch(display_x, display_y)?;
-        let display = PROFILE.touch_to_display(raw.0, raw.1)?;
+        let raw = selected_profile().display_to_touch(display_x, display_y)?;
+        let display = selected_profile().touch_to_display(raw.0, raw.1)?;
         self.last_touch = Some(SimulatedTouch { display, raw });
         let action = self.screen.hit_test(
             i32::try_from(display.0).ok()?,
@@ -563,9 +573,9 @@ impl AppServer {
             &Frame {
                 request_id: hello.request_id,
                 message: Message::Welcome {
-                    width: u16::try_from(PROFILE.width).unwrap_or(u16::MAX),
-                    height: u16::try_from(PROFILE.height).unwrap_or(u16::MAX),
-                    pixels_per_inch: PROFILE.pixels_per_inch,
+                    width: u16::try_from(selected_profile().width).unwrap_or(u16::MAX),
+                    height: u16::try_from(selected_profile().height).unwrap_or(u16::MAX),
+                    pixels_per_inch: selected_profile().pixels_per_inch,
                     text_scale: profile_metrics().text_scale,
                 },
             },
@@ -1085,7 +1095,10 @@ impl AppSession {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut surface = Surface::new(PROFILE.width as usize, PROFILE.height as usize);
+        let mut surface = Surface::new(
+            selected_profile().width as usize,
+            selected_profile().height as usize,
+        );
         kobo_ui::render_all(
             &state.screen,
             &profile_metrics(),
@@ -1116,8 +1129,8 @@ impl AppSession {
 
     fn touch_action(&self, x: i32, y: i32) -> Option<ActionId> {
         let display = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
-        let raw = PROFILE.display_to_touch(display.0, display.1)?;
-        let mapped = PROFILE.touch_to_display(raw.0, raw.1)?;
+        let raw = selected_profile().display_to_touch(display.0, display.1)?;
+        let mapped = selected_profile().touch_to_display(raw.0, raw.1)?;
         let mut state = self
             .state
             .lock()
@@ -1340,17 +1353,17 @@ fn simulation_json(
             "\"partialsSinceClean\":{},\"touch\":{},",
             "\"panelApproximation\":true}}"
         ),
-        json_string(PROFILE.id),
-        json_string(PROFILE.model),
-        PROFILE.width,
-        PROFILE.height,
-        PROFILE.pixels_per_inch,
-        PROFILE.rotation,
-        json_string(PROFILE.touch_name),
-        PROFILE.touch_x_min,
-        PROFILE.touch_x_max,
-        PROFILE.touch_y_min,
-        PROFILE.touch_y_max,
+        json_string(selected_profile().id),
+        json_string(selected_profile().model),
+        selected_profile().width,
+        selected_profile().height,
+        selected_profile().pixels_per_inch,
+        selected_profile().rotation,
+        json_string(selected_profile().touch_name),
+        selected_profile().touch_x_min,
+        selected_profile().touch_x_max,
+        selected_profile().touch_y_min,
+        selected_profile().touch_y_max,
         json_string(scenario.name()),
         json_string(lifecycle),
         transition,
@@ -2060,6 +2073,12 @@ pub fn run_server_at(address: &str) -> io::Result<()> {
 /// application.
 const SIM_SECRETS: &str = "cobalt-sim-secrets";
 
+/// Enables the deterministic Prêt numérique API used by the Kobo drive
+/// scripts. It is opt-in so the normal simulator remains an honest client of
+/// the network backend rather than silently replacing a real service.
+const PRET_NUMERIQUE_FIXTURE: &str = "KOBO_SIM_PRET_NUMERIQUE_FIXTURE";
+const PRET_NUMERIQUE_API: &str = "https://home.lapal.me:3300/pret/v1";
+
 /// Set this to any value to make every network task fail.
 ///
 /// Failure handling is code, and code nobody has run does not work. This is
@@ -2091,8 +2110,8 @@ fn simulated_tasks(name: &str) -> TaskRunner {
         );
         let _ = kobo_net::trust_owner_roots_from_dir(&directory);
     });
-    let runner = TaskRunner::simulated(std::env::temp_dir())
-        .with_secrets(std::env::temp_dir().join(SIM_SECRETS));
+    let secrets = simulator_secrets_directory();
+    let runner = TaskRunner::simulated(std::env::temp_dir()).with_secrets(secrets);
     if std::env::var_os(OFFLINE).is_some() {
         return runner;
     }
@@ -2102,13 +2121,91 @@ fn simulated_tasks(name: &str) -> TaskRunner {
     // "Permission needed" in the simulator no matter which key was installed,
     // and could only ever be run on hardware.
     let app = name.to_owned();
+    let credentials: Arc<SimCredentialPolicy> =
+        Arc::new(move |credential: &kobo_protocol::Credential, url: &str| {
+            kobo_net::credential_allowed(&app, credential, url)
+        });
+    if name == "pret-numerique" && std::env::var_os(PRET_NUMERIQUE_FIXTURE).is_some() {
+        return runner
+            .with_fetch(Arc::new(pret_fixture_fetch))
+            .with_post(Arc::new(pret_fixture_post))
+            .with_credential_policy(credentials)
+            .with_capabilities([kobo_policy::Capability::Network]);
+    }
     runner
         .with_fetch(Arc::new(kobo_net::fetch_from))
         .with_post(Arc::new(kobo_net::post))
-        .with_credential_policy(Arc::new(move |credential, url| {
-            kobo_net::credential_allowed(&app, credential, url)
-        }))
+        .with_credential_policy(credentials)
         .with_capabilities([kobo_policy::Capability::Network])
+}
+
+/// Gives the fixture a disposable, non-secret named credential. The value is
+/// deliberately not a library token; the fixture only proves that the
+/// runtime resolves the Kobo secret and supplies it to the backend.
+fn simulator_secrets_directory() -> PathBuf {
+    let directory = std::env::temp_dir().join(format!("{SIM_SECRETS}-{}", std::process::id()));
+    if std::env::var_os(PRET_NUMERIQUE_FIXTURE).is_some() {
+        let _ = fs::create_dir_all(&directory);
+        let _ = fs::write(
+            directory.join("pret-numerique-api"),
+            b"simulator-fixture-token\n",
+        );
+    }
+    directory
+}
+
+fn pret_fixture_path(url: &str) -> Option<&str> {
+    url.strip_prefix(PRET_NUMERIQUE_API)
+        .map(|suffix| suffix.split('?').next().unwrap_or(suffix))
+}
+
+fn pret_fixture_fetch(
+    url: &str,
+    _offset: u32,
+    _max_bytes: u32,
+    _headers: &[(&str, &str)],
+) -> Result<Vec<u8>, kobo_protocol::TaskError> {
+    let Some(path) = pret_fixture_path(url) else {
+        return Err(kobo_protocol::TaskError::NotFound);
+    };
+    let body = match path {
+        "/health" => {
+            br#"{"status":"ok","version":"1","queue_depth":0,"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#
+        }
+        "/jobs" => {
+            r#"{"jobs":[{"id":"fixture-auth","kind":"borrow","state":"auth_required","title":"Authentication fixture","catalog":"montreal","error_message":"Montréal needs authentication on the proxy."},{"id":"fixture-hook","kind":"import","state":"hook_failed","title":"Hook fixture","catalog":"banq","error_message":"The hook exited with status 1. The LCPL was retained."}]}"#.as_bytes()
+        }
+        "/books" => {
+            br#"[{"id":"fixture-book-montreal","title":"Fixture return title","catalog":"montreal","file_name":"Fixture return title.lcpl"},{"id":"fixture-book-banq","title":"Fixture BAnQ title","catalog":"banq","file_name":"Fixture BAnQ title.lcpl"}]"#
+        }
+        _ => return Err(kobo_protocol::TaskError::NotFound),
+    };
+    Ok(body.to_vec())
+}
+
+fn pret_fixture_post(
+    url: &str,
+    _body: &[u8],
+    _content_type: &str,
+    _credential: Option<(&str, &str)>,
+    _headers: &[(&str, &str)],
+    _max_bytes: u32,
+) -> Result<Vec<u8>, kobo_protocol::TaskError> {
+    let Some(path) = pret_fixture_path(url) else {
+        return Err(kobo_protocol::TaskError::NotFound);
+    };
+    let body: &[u8] = if path == "/search" {
+        r#"{"results":[{"title":"Dune","authors":["Frank Herbert"],"isbn":"9780441013593","sources":[{"handle":"fixture-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+    } else if path == "/jobs" {
+        br#"{"id":"fixture-borrow-job","kind":"borrow","state":"queued","title":"Dune","catalog":"montreal"}"#
+    } else if path.starts_with("/jobs/") && path.ends_with("/retry-hook") {
+        br#"{"id":"fixture-hook-retry","kind":"import","state":"queued","title":"Hook fixture","catalog":"banq"}"#
+    } else if path.starts_with("/books/") && path.ends_with("/return") {
+        br#"{"id":"fixture-return-job","kind":"return","state":"queued","title":"Fixture return title","catalog":"montreal"}"#
+    } else {
+        return Err(kobo_protocol::TaskError::NotFound);
+    };
+    Ok(body.to_vec())
 }
 
 /// Gives the simulator the same type the panel gets.
@@ -2371,7 +2468,7 @@ figcaption { margin-top:12px; color:var(--muted); font-size:.875rem; }
       <p class="note">Residue is an explicit visual approximation. Pixel output and refresh selection are exact.</p>
     </section>
     <section class="card">
-      <h2>Clara BW profile</h2>
+      <h2>Kobo profile</h2>
       <dl class="facts">
         <dt>Panel</dt><dd id="geometry">1072 × 1448</dd>
         <dt>Density</dt><dd id="density">300 PPI</dd>
@@ -2738,7 +2835,7 @@ mod tests {
         let mut simulator = Simulator::new();
         assert_eq!(
             simulator.frame().len(),
-            (PROFILE.width * PROFILE.height) as usize
+            (selected_profile().width * selected_profile().height) as usize
         );
         let button = simulator.screen().layout().nodes[2].rect;
         assert_eq!(
@@ -2758,7 +2855,7 @@ mod tests {
         simulator.touch(x, y).expect("button is touchable");
 
         let payload = simulator.simulation_json();
-        let raw = PROFILE
+        let raw = selected_profile()
             .display_to_touch(
                 u32::try_from(x).expect("positive display x"),
                 u32::try_from(y).expect("positive display y"),
@@ -2971,9 +3068,9 @@ mod tests {
             assert_eq!(
                 welcome.message,
                 Message::Welcome {
-                    width: u16::try_from(PROFILE.width).expect("profile width"),
-                    height: u16::try_from(PROFILE.height).expect("profile height"),
-                    pixels_per_inch: PROFILE.pixels_per_inch,
+                    width: u16::try_from(selected_profile().width).expect("profile width"),
+                    height: u16::try_from(selected_profile().height).expect("profile height"),
+                    pixels_per_inch: selected_profile().pixels_per_inch,
                     text_scale: kobo_ui::TextScale::Default,
                 }
             );
