@@ -13,7 +13,7 @@ and touch profile. A matching model name alone is not sufficient.
 |---|---|---|---|
 | Kobo Clara BW | N365, code 391, firmware 4.45.23697, kernel 4.9.77 | Read-only probe and owner-attended display, touch, exit, and recovery tests complete | Fully tested |
 | Kobo Elipsa 2E | N605, code 389, firmware 4.38.23697, kernel 4.9.77 | Read-only probe and owner-attended display, touch, exit, suspend/resume, and recovery tests complete | Fully tested |
-| Kobo Clara 2E | N506, code 386, firmware 4.38.23697, kernel 4.1.15 | Read-only probe, physical touch transform, NTx refresh, reversible pixels, and whole-screen restore complete; exit, recovery, and restart evidence pending | Profile registered; ordinary writes blocked |
+| Kobo Clara 2E | N506, code 386, firmware 4.38.23697, kernel 4.1.15 | Read-only probe, physical touch transform, NTx refresh, reversible pixels, whole-screen restore, DU waveform, and guarded recovery complete; exit and restart evidence pending | Profile registered; ordinary writes blocked |
 
 `Read-only doctor match complete` means the profile describes the observed
 identity, framebuffer, and touch ranges. It does not prove the physical touch
@@ -550,6 +550,11 @@ failure; a Todo session rendered at 1404×1872 with physical taps reaching UI
 actions; release of panel and touch followed by a successful stock-reader
 restart; and suspend/resume with monotonic device uptime and no Cobalt process
 left running.
+
+Proven on the physical N506: the measured `fts_ts` touch transform; the NTx
+GC16 refresh; reversible GC16 and DU pixel restores; whole-screen snapshot and
+restore; and guardian restoration after a deliberate child failure. Exit and
+stock-reader restart remain pending before `write_ready` can be enabled.
 
 Update markers are random and at least `0x40000000`, because markers are a
 global namespace shared with the stock reader and a low fixed marker could be

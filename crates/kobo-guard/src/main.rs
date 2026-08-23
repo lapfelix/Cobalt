@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 /// that supervising a child is its own deliberate decision.
 const GUARD_UNLOCK_VARIABLE: &str = "KOBO_GUARD_UNLOCK";
 const GUARD_UNLOCK_PHRASE: &str = "OWNER_ATTENDED_GUARDED_SESSION";
+const GUARD_VALIDATION_VARIABLE: &str = "KOBO_GUARD_VALIDATION";
+const GUARD_VALIDATION_PHRASE: &str = "OWNER_ATTENDED_CANDIDATE_GUARD_VALIDATION";
 
 /// Bounds on how long a supervised child may run.
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
@@ -85,10 +87,22 @@ fn run(arguments: &[String]) -> Result<String, String> {
     }
     let request = Request::parse(arguments)?;
 
+    let validation = env::var(GUARD_VALIDATION_VARIABLE).ok();
+    let candidate_validation = validation.as_deref() == Some(GUARD_VALIDATION_PHRASE);
+    if candidate_validation && !request.prove_restore {
+        return Err(
+            "candidate guard validation requires the fixed --prove-restore probe".to_owned(),
+        );
+    }
+
     // The display session applies the profile, geometry and identity gates, so
     // a screen is only ever captured or written on exactly the known hardware.
-    let session =
-        DisplaySession::open(Some(OWNER_UNLOCK_PHRASE)).map_err(|error| error.to_string())?;
+    let session = if candidate_validation {
+        DisplaySession::open_for_guard_validation(validation.as_deref())
+    } else {
+        DisplaySession::open(Some(OWNER_UNLOCK_PHRASE))
+    }
+    .map_err(|error| error.to_string())?;
     let geometry = session.geometry();
     let whole_screen = Rect {
         x: 0,

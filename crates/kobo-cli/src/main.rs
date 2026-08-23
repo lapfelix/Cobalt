@@ -209,6 +209,8 @@ const GUARD_TEST_CHILD: &str = "/bin/false";
 const GUARD_TEST_TIMEOUT_SECONDS: u64 = 10;
 #[cfg(feature = "device-write")]
 const GUARD_TEST_CONFIRMATION: &str = "GUARD_RESTORE_AFTER_FAILURE";
+#[cfg(feature = "device-write")]
+const GUARD_TEST_VALIDATION_UNLOCK: &str = "OWNER_ATTENDED_CANDIDATE_GUARD_VALIDATION";
 
 /// The owner-attended smoke stages, selected by an exact confirmation phrase.
 ///
@@ -2481,6 +2483,7 @@ fn remote_fixed_artifact_script(
         RemoteProgram::Guard => format!(
             "if [ -x /usr/bin/timeout ]; then\n\
              \x20 KOBO_GUARD_UNLOCK='OWNER_ATTENDED_GUARDED_SESSION' \
+             KOBO_GUARD_VALIDATION='{GUARD_TEST_VALIDATION_UNLOCK}' \
              /usr/bin/timeout {} \"$bin\" --run {GUARD_TEST_CHILD} --prove-restore \
              --timeout-seconds {GUARD_TEST_TIMEOUT_SECONDS}\n\
              else\n\
@@ -5784,10 +5787,10 @@ mod tests {
     fn every_installed_package_is_a_member_of_this_workspace() {
         let manifest = fs::read_to_string(super::workspace_manifest()).expect("read the workspace");
         for (name, _) in super::INSTALLED_PACKAGES {
-            let directory = if *name == "kobod" {
-                "crates/kobod".to_owned()
-            } else {
-                format!("examples/{}", name.trim_start_matches("kobo-"))
+            let directory = match *name {
+                "kobod" => "crates/kobod".to_owned(),
+                "kobo-pret-numerique" => "apps/pret-numerique".to_owned(),
+                _ => format!("examples/{}", name.trim_start_matches("kobo-")),
             };
             assert!(
                 manifest.contains(&format!("\"{directory}\"")),

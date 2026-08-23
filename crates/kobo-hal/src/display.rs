@@ -41,6 +41,7 @@ const SMOKE_PATCH_REGION: Rect = Rect {
 };
 const SMOKE_VISIBLE_HOLD: Duration = Duration::from_millis(1200);
 const ATTENDED_SMOKE_UNLOCK_PHRASE: &str = "OWNER_ATTENDED_CANDIDATE_DISPLAY_VALIDATION";
+const ATTENDED_GUARD_UNLOCK_PHRASE: &str = "OWNER_ATTENDED_CANDIDATE_GUARD_VALIDATION";
 
 /// One bounded operation used to gather owner-attended display evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +163,18 @@ impl DisplaySession {
             Path::new("/dev/fb0"),
             WritePolicy::AttendedCandidateValidation,
         )
+    }
+
+    /// Opens the framebuffer for the fixed, owner-attended guard restoration
+    /// probe while the profile's ordinary write evidence is still pending.
+    ///
+    /// This does not make a general candidate-capable session available: the
+    /// guard binary only calls it for its bounded `--prove-restore` test.
+    pub fn open_for_guard_validation(unlock: Option<&str>) -> Result<Self, DisplayError> {
+        if unlock != Some(ATTENDED_GUARD_UNLOCK_PHRASE) {
+            return Err(DisplayError::UnlockMissing);
+        }
+        Self::open_for_attended_validation()
     }
 
     fn open_verified(
