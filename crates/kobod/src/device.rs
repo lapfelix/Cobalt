@@ -2378,6 +2378,7 @@ fn start_application(
     let tasks = TaskRunner::simulated(std::env::temp_dir())
         .with_fetch(Arc::new(kobo_net::fetch_from))
         .with_post(Arc::new(kobo_net::post))
+        .with_shared_files("/mnt/onboard")
         .with_secrets(SECRETS)
         .with_credential_policy(Arc::new(move |credential, url| {
             kobo_net::credential_allowed(&credential_app, credential, url)

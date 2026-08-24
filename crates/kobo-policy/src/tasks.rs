@@ -7,11 +7,11 @@
 //! exactly once.
 
 use kobo_protocol::{
-    Credential, SecretHeader, Task, TaskError, TaskId, TaskOutcome, MAX_TASK_BYTES,
-    MAX_TASK_BYTES_U32,
+    Credential, SecretHeader, Task, TaskError, TaskId, TaskOutcome, MAX_SHARED_FILE_BYTES_U32,
+    MAX_TASK_BYTES, MAX_TASK_BYTES_U32,
 };
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -184,6 +184,10 @@ pub struct TaskRunner {
     /// The directory a `ReadFile` task is confined to. Every path is resolved
     /// against this and anything that escapes it is refused.
     root: PathBuf,
+    /// The user-visible directory a `DownloadSharedFile` task may publish to.
+    /// Keeping this separate from `root` means an app cannot turn a private
+    /// read permission into a shared-files write permission.
+    shared_root: Option<PathBuf>,
     granted: Vec<Capability>,
     running: HashMap<TaskId, Running>,
     sender: Sender<Finished>,
@@ -209,6 +213,7 @@ impl std::fmt::Debug for TaskRunner {
         formatter
             .debug_struct("TaskRunner")
             .field("root", &self.root)
+            .field("shared_files", &self.shared_root.is_some())
             .field("granted", &self.granted)
             .field("running", &self.running.len())
             .field("networked", &self.fetch.is_some())
@@ -232,6 +237,7 @@ impl TaskRunner {
         let (sender, receiver) = channel();
         Self {
             root: root.into(),
+            shared_root: None,
             granted: Vec::new(),
             running: HashMap::new(),
             sender,
@@ -262,6 +268,13 @@ impl TaskRunner {
     #[must_use]
     pub fn with_post(mut self, post: Arc<Poster>) -> Self {
         self.post = Some(post);
+        self
+    }
+
+    /// Supplies the user-visible directory used by `DownloadSharedFile`.
+    #[must_use]
+    pub fn with_shared_files(mut self, root: impl Into<PathBuf>) -> Self {
+        self.shared_root = Some(root.into());
         self
     }
 
@@ -326,23 +339,26 @@ impl TaskRunner {
         let required = match &work {
             Task::Fetch { .. } | Task::Post { .. } => Some(Capability::Network),
             Task::ReadFile { .. } | Task::Sleep { .. } => None,
+            Task::DownloadSharedFile { .. } => Some(Capability::Network),
         };
-        if let Some(capability) = required {
-            if !self.grants(capability) {
-                let _ = self.sender.send(Finished {
-                    task,
-                    outcome: TaskOutcome::Failed(TaskError::Denied),
-                });
-                if let Some(wake) = &self.wake {
-                    wake();
-                }
-                return Ok(());
+        let shared_files_required = matches!(work, Task::DownloadSharedFile { .. });
+        if required.is_some_and(|capability| !self.grants(capability))
+            || (shared_files_required && !self.grants(Capability::SharedFiles))
+        {
+            let _ = self.sender.send(Finished {
+                task,
+                outcome: TaskOutcome::Failed(TaskError::Denied),
+            });
+            if let Some(wake) = &self.wake {
+                wake();
             }
+            return Ok(());
         }
 
         let cancel = Arc::new(AtomicBool::new(false));
         let sender = self.sender.clone();
         let root = self.root.clone();
+        let shared_root = self.shared_root.clone();
         let fetch = self.fetch.clone();
         let post = self.post.clone();
         let secrets = self.secrets.clone();
@@ -360,6 +376,7 @@ impl TaskRunner {
                         post: post.as_deref(),
                         secrets: secrets.as_deref(),
                         credentials: credentials.as_deref(),
+                        shared_root: shared_root.as_deref(),
                     },
                     &flag,
                 );
@@ -456,6 +473,7 @@ struct Backends<'a> {
     post: Option<&'a Poster>,
     secrets: Option<&'a Path>,
     credentials: Option<&'a CredentialAuthorizer>,
+    shared_root: Option<&'a Path>,
 }
 
 /// Reads a named secret.
@@ -498,6 +516,7 @@ fn run(work: &Task, root: &Path, backends: Backends<'_>, cancel: &AtomicBool) ->
         post,
         secrets,
         credentials,
+        shared_root,
     } = backends;
     match work {
         Task::Sleep { seconds } => {
@@ -610,6 +629,102 @@ fn run(work: &Task, root: &Path, backends: Backends<'_>, cancel: &AtomicBool) ->
                 Ok(bytes) => TaskOutcome::Completed(bytes),
                 Err(error) => TaskOutcome::Failed(error),
             }
+        }
+        Task::DownloadSharedFile {
+            url,
+            path,
+            credential: wanted,
+            max_bytes,
+        } => {
+            let Some(shared_root) = shared_root else {
+                return TaskOutcome::Failed(TaskError::Denied);
+            };
+            let Some(fetch) = fetch else {
+                return TaskOutcome::Failed(TaskError::Denied);
+            };
+            let Some(target) = resolve(shared_root, path) else {
+                return TaskOutcome::Failed(TaskError::Denied);
+            };
+            let Some(parent) = target.parent() else {
+                return TaskOutcome::Failed(TaskError::Denied);
+            };
+            if std::fs::create_dir_all(parent).is_err() {
+                return TaskOutcome::Failed(TaskError::NotFound);
+            }
+            let Some(name) = target.file_name().and_then(|name| name.to_str()) else {
+                return TaskOutcome::Failed(TaskError::Denied);
+            };
+            let part = target.with_file_name(format!(".{name}.part"));
+            let _ignored = std::fs::remove_file(&part);
+            let mut file = match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&part)
+            {
+                Ok(file) => file,
+                Err(_) => return TaskOutcome::Failed(TaskError::NotFound),
+            };
+            let credential = match resolved_credential(wanted.as_ref(), url, credentials, secrets) {
+                Ok(credential) => credential,
+                Err(error) => {
+                    let _ignored = std::fs::remove_file(&part);
+                    return TaskOutcome::Failed(error);
+                }
+            };
+            let mut offset = 0u32;
+            let mut total = 0u64;
+            let maximum = u64::from((*max_bytes).min(MAX_SHARED_FILE_BYTES_U32));
+            if maximum == 0 {
+                let _ignored = std::fs::remove_file(&part);
+                return TaskOutcome::Failed(TaskError::TooLarge);
+            }
+            loop {
+                if cancel.load(Ordering::SeqCst) {
+                    let _ignored = std::fs::remove_file(&part);
+                    return TaskOutcome::Cancelled;
+                }
+                let mut headers = Vec::new();
+                if let Some((name, value)) = &credential {
+                    headers.push((name.as_str(), value.as_str()));
+                }
+                let bytes = match fetch(url, offset, MAX_TASK_BYTES_U32, &headers) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let _ignored = std::fs::remove_file(&part);
+                        return TaskOutcome::Failed(error);
+                    }
+                };
+                if bytes.is_empty() {
+                    if total == 0 {
+                        let _ignored = std::fs::remove_file(&part);
+                        return TaskOutcome::Failed(TaskError::NotFound);
+                    }
+                    break;
+                }
+                let next_total = total.saturating_add(bytes.len() as u64);
+                if next_total > maximum {
+                    let _ignored = std::fs::remove_file(&part);
+                    return TaskOutcome::Failed(TaskError::TooLarge);
+                }
+                if file.write_all(&bytes).is_err() {
+                    let _ignored = std::fs::remove_file(&part);
+                    return TaskOutcome::Failed(TaskError::NotFound);
+                }
+                total = next_total;
+                if bytes.len() < MAX_TASK_BYTES_U32 as usize {
+                    break;
+                }
+                let Some(next_offset) = offset.checked_add(bytes.len() as u32) else {
+                    let _ignored = std::fs::remove_file(&part);
+                    return TaskOutcome::Failed(TaskError::TooLarge);
+                };
+                offset = next_offset;
+            }
+            if file.sync_all().is_err() || std::fs::rename(&part, &target).is_err() {
+                let _ignored = std::fs::remove_file(&part);
+                return TaskOutcome::Failed(TaskError::NotFound);
+            }
+            TaskOutcome::Completed(Vec::new())
         }
     }
 }
@@ -905,6 +1020,47 @@ mod tests {
             finished[0].outcome,
             TaskOutcome::Completed(b"https://example.test/a".to_vec())
         );
+    }
+
+    #[test]
+    fn a_shared_file_download_is_range_fetched_and_published_atomically() {
+        let root = temp_root("shared-file");
+        let shared = root.join("shared");
+        let contents = Arc::new(
+            (0..(MAX_TASK_BYTES_U32 as usize + 17))
+                .map(|byte| (byte % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        let source = Arc::clone(&contents);
+        let mut runner = TaskRunner::simulated(&root)
+            .with_shared_files(&shared)
+            .with_capabilities([Capability::Network, Capability::SharedFiles])
+            .with_fetch(Arc::new(move |_, offset, maximum, _| {
+                let start = usize::try_from(offset).expect("offset fits");
+                if start >= source.len() {
+                    return Ok(Vec::new());
+                }
+                let end = (start + maximum as usize).min(source.len());
+                Ok(source[start..end].to_vec())
+            }));
+        runner
+            .submit(
+                TaskId(1),
+                Task::DownloadSharedFile {
+                    url: "https://example.test/book".into(),
+                    path: "PretNumerique/book.epub".into(),
+                    credential: None,
+                    max_bytes: MAX_SHARED_FILE_BYTES_U32,
+                },
+            )
+            .expect("submitted");
+        let finished = collect(&mut runner, 1);
+        assert_eq!(finished[0].outcome, TaskOutcome::Completed(Vec::new()));
+        assert_eq!(
+            std::fs::read(shared.join("PretNumerique/book.epub")).expect("published book"),
+            *contents
+        );
+        assert!(!shared.join("PretNumerique/.book.epub.part").exists());
     }
 
     #[test]

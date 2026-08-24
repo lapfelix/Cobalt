@@ -102,6 +102,13 @@ pub const MAX_TASK_BYTES_U32: u32 = 4 * 1024 * 1024;
 /// Declaring the wire width first means the conversion only ever widens.
 pub const MAX_TASK_BYTES: usize = MAX_TASK_BYTES_U32 as usize;
 
+/// The largest file a runtime may stream into the Kobo's shared book storage.
+///
+/// Unlike `Fetch`, this task does not return the bytes in a frame. The runtime
+/// requests four-megabyte ranges and writes them directly to a temporary file,
+/// so the ceiling protects disk space rather than the event-loop reply.
+pub const MAX_SHARED_FILE_BYTES_U32: u32 = 512 * 1024 * 1024;
+
 /// The most an application may send in one request body.
 ///
 /// A body is not a label. It carries a document, a research digest, a batch of
@@ -396,6 +403,15 @@ pub enum Task {
     ReadFile { path: String },
     /// Waits, without holding a wake lock.
     Sleep { seconds: u32 },
+    /// Streams a URL into a user-visible file, atomically replacing the target
+    /// only after every range has arrived. The runtime owns both the network
+    /// connection and the shared-files path; the application only names them.
+    DownloadSharedFile {
+        url: String,
+        path: String,
+        credential: Option<Credential>,
+        max_bytes: u32,
+    },
 }
 
 impl Task {
@@ -435,6 +451,17 @@ impl Task {
             }
             Self::ReadFile { path } => path.len() <= MAX_STRING_LEN,
             Self::Sleep { .. } => true,
+            Self::DownloadSharedFile {
+                url,
+                path,
+                credential,
+                max_bytes,
+            } => {
+                url.len() <= MAX_URL_LEN
+                    && path.len() <= MAX_STRING_LEN
+                    && *max_bytes <= MAX_SHARED_FILE_BYTES_U32
+                    && credential.as_ref().is_none_or(Credential::is_well_formed)
+            }
         }
     }
 }
@@ -1692,6 +1719,18 @@ fn encode_task_message(payload: &mut Vec<u8>, message: &Message) -> Result<(), P
                     }
                     push_u32(payload, *max_bytes);
                 }
+                Task::DownloadSharedFile {
+                    url,
+                    path,
+                    credential,
+                    max_bytes,
+                } => {
+                    payload.push(4);
+                    push_string(payload, url)?;
+                    push_string(payload, path)?;
+                    push_credential(payload, credential.as_ref())?;
+                    push_u32(payload, *max_bytes);
+                }
             }
         }
         Message::Cancel { task } => push_u32(payload, task.0),
@@ -2027,6 +2066,28 @@ fn encoded_task_len(work: &Task) -> Result<usize, ProtocolError> {
             for header in headers {
                 add_encoded_len(&mut length, encoded_string_len(&header.name)?)?;
                 add_encoded_len(&mut length, encoded_string_len(&header.value)?)?;
+            }
+        }
+        Task::DownloadSharedFile {
+            url,
+            path,
+            credential,
+            ..
+        } => {
+            if credential
+                .as_ref()
+                .is_some_and(|credential| !credential.is_well_formed())
+            {
+                return Err(ProtocolError::InvalidValue("credential"));
+            }
+            add_encoded_len(&mut length, 5)?;
+            add_encoded_len(&mut length, encoded_string_len(url)?)?;
+            add_encoded_len(&mut length, encoded_string_len(path)?)?;
+            if let Some(credential) = credential {
+                add_encoded_len(&mut length, encoded_string_len(&credential.secret)?)?;
+                if let SecretHeader::Named(name) = &credential.header {
+                    add_encoded_len(&mut length, encoded_string_len(name)?)?;
+                }
             }
         }
     }
@@ -3550,6 +3611,20 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, ProtocolError> {
                         credential,
                         headers,
                         max_bytes: min(reader.u32()?, MAX_TASK_BYTES_U32),
+                    }
+                }
+                4 => {
+                    let url = reader.string()?;
+                    if url.len() > MAX_URL_LEN {
+                        return Err(ProtocolError::StringTooLarge);
+                    }
+                    let path = reader.string()?;
+                    let credential = take_credential(&mut reader)?;
+                    Task::DownloadSharedFile {
+                        url,
+                        path,
+                        credential,
+                        max_bytes: min(reader.u32()?, MAX_SHARED_FILE_BYTES_U32),
                     }
                 }
                 _ => return Err(ProtocolError::InvalidValue("task kind")),
@@ -7465,6 +7540,15 @@ mod store_tests {
                     credential: None,
                     headers: Vec::new(),
                     max_bytes: 4096,
+                },
+            },
+            Message::Spawn {
+                task: TaskId(17),
+                work: Task::DownloadSharedFile {
+                    url: "https://example.invalid/book/content".into(),
+                    path: "PretNumerique/book.epub".into(),
+                    credential: Some(Credential::bearer("pret-numerique-api")),
+                    max_bytes: MAX_SHARED_FILE_BYTES_U32,
                 },
             },
             Message::Cancel { task: TaskId(12) },

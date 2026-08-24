@@ -123,7 +123,12 @@ stops the moment the job settles, the reader navigates away, or the app goes to
 the background.
 
 Successes land in Library, which is where a reader would look for a loan
-anyway. The outcomes that need a person go where they belong:
+anyway. For a completed borrow, Cobalt asks the runtime to stream the
+decrypted EPUB from the proxy's authenticated `/books/{id}/content` endpoint
+into Kobo's shared book storage. The runtime downloads bounded ranges and
+atomically renames the finished file, so Nickel never sees a partial book.
+The app never receives the EPUB bytes, the LCPL, or a decryption key. The
+outcomes that need a person go where they belong:
 
 - A delivery failure (`hook_failed`) is a failure to copy the book to the
   reader; the loan and the licence are both intact. It appears on that loan's

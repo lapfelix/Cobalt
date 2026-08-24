@@ -1,11 +1,13 @@
 //! A Kobo-only client for the server-side Prêt numérique proxy.
 //!
 //! The reader holds only opaque publication handles and the last search it was
-//! given. It never receives an OPDS URL, an LCPL, an EPUB, or either library's
-//! login material, and it keeps no record of a request between launches: the
-//! server owns that list and is asked for it. Every request that changes
-//! something on the server uses `spawn`, while searches and status reads use
-//! `spawn_retrying`.
+//! given. It never receives an OPDS URL, an LCPL, or either library's login
+//! material. A completed borrow is streamed by the runtime from the proxy's
+//! authenticated content endpoint into Kobo's shared book storage, without
+//! exposing the EPUB or a decryption key to the app. It keeps no record of a
+//! request between launches: the server owns that list and is asked for it.
+//! Every request that changes something on the server uses `spawn`, while
+//! searches and status reads use `spawn_retrying`.
 //!
 //! There is no screen listing jobs. A borrow, a hold or a return is followed
 //! where the reader started it, a success lands in Library because that is
@@ -32,6 +34,8 @@ use std::process::ExitCode;
 
 const API: &str = "https://home.lapal.me:3300/pret/v1";
 const API_SECRET: &str = "pret-numerique-api";
+const BOOK_DOWNLOAD_DIR: &str = "PretNumerique";
+const BOOK_DOWNLOAD_MAX_BYTES: u32 = 512 * 1024 * 1024;
 const STORE_STATE: &str = "ui-state";
 const COVER_PICTURE_HANDLE: PictureHandle = PictureHandle(41);
 const COVER_WIDTH: u32 = 260;
@@ -496,6 +500,7 @@ enum RequestKind {
     Hold,
     Return,
     RetryHook,
+    Download,
     Acknowledge,
 }
 
@@ -567,6 +572,10 @@ struct PretNumerique {
     watch: Option<Watch>,
     inflight: Option<(TaskId, RequestKind)>,
     queued_request: Option<RequestKind>,
+    /// Book IDs already handed to the runtime during this app session. This
+    /// also prevents a completed historical loan from being downloaded again
+    /// every time the post-download Library refresh reads `/jobs`.
+    download_attempts: Vec<String>,
     sleep_task: Option<TaskId>,
     /// The panel this app is drawing to, learned from the runtime.
     ///
@@ -628,6 +637,7 @@ impl Default for PretNumerique {
             watch: None,
             inflight: None,
             queued_request: None,
+            download_attempts: Vec::new(),
             sleep_task: None,
             metrics: kobo_sdk::CLARA_BW_METRICS,
             note: None,
@@ -2723,6 +2733,42 @@ impl PretNumerique {
         self.show(context);
     }
 
+    /// Once the proxy says a borrow or import is complete, copy its decrypted
+    /// EPUB into the reader's shared book folder. The runtime performs the
+    /// range requests and atomic rename; this app only supplies the stable
+    /// book ID and a user-visible filename.
+    fn start_book_download(&mut self, context: &mut Context, job: &Job) -> bool {
+        if !matches!(job.kind.as_str(), "borrow" | "import")
+            || job.state != "complete"
+            || job.book_id.is_none()
+        {
+            return false;
+        }
+        let Some(book_id) = job.book_id.as_deref() else {
+            return false;
+        };
+        if self.download_attempts.iter().any(|id| id == book_id) {
+            return false;
+        }
+        self.download_attempts.push(book_id.to_owned());
+        let task = Task::DownloadSharedFile {
+            url: format!("{API}/books/{}/content", percent_encode(book_id)),
+            path: format!("{BOOK_DOWNLOAD_DIR}/{book_id}.epub"),
+            credential: Some(Self::credential()),
+            max_bytes: BOOK_DOWNLOAD_MAX_BYTES,
+        };
+        self.note = Some("Borrowed. Saving the book on your Kobo...".to_owned());
+        if let Some(task_id) = context.spawn(task) {
+            self.inflight = Some((task_id, RequestKind::Download));
+            true
+        } else {
+            self.note = Some(
+                "The loan is active, but the Kobo runtime could not start the download.".to_owned(),
+            );
+            false
+        }
+    }
+
     fn start_return(&mut self, context: &mut Context) {
         if !self.clear_for_request(context) {
             return;
@@ -3070,6 +3116,18 @@ impl PretNumerique {
             RequestKind::Jobs => match parse_jobs(body) {
                 Some(jobs) => {
                     self.jobs = jobs;
+                    let historical_download = self
+                        .jobs
+                        .iter()
+                        .find(|job| {
+                            matches!(job.kind.as_str(), "borrow" | "import")
+                                && job.state == "complete"
+                                && job.book_id.is_some()
+                        })
+                        .cloned();
+                    if let Some(job) = historical_download {
+                        self.start_book_download(context, &job);
+                    }
                     // The dates and the holds come from the libraries rather
                     // than the home server, so Library is three reads.
                     self.queued_request = Some(RequestKind::Shelf);
@@ -3087,11 +3145,13 @@ impl PretNumerique {
                             .as_ref()
                             .is_some_and(|current| current.id == job.id)
                         {
-                            watch.job = Some(job);
+                            watch.job = Some(job.clone());
                         }
                     }
                     if settled {
-                        self.queued_request = Some(RequestKind::Books);
+                        if !self.start_book_download(context, &job) {
+                            self.queued_request = Some(RequestKind::Books);
+                        }
                     } else {
                         self.schedule_poll(context);
                     }
@@ -3123,7 +3183,17 @@ impl PretNumerique {
                             watch.job = Some(job);
                         }
                         if settled {
-                            self.queued_request = Some(RequestKind::Books);
+                            let completed = self
+                                .watch
+                                .as_ref()
+                                .and_then(|watch| watch.job.as_ref())
+                                .cloned();
+                            if completed
+                                .as_ref()
+                                .is_none_or(|job| !self.start_book_download(context, job))
+                            {
+                                self.queued_request = Some(RequestKind::Books);
+                            }
                         } else {
                             self.schedule_poll(context);
                         }
@@ -3148,7 +3218,17 @@ impl PretNumerique {
                         job: Some(job),
                     });
                     if settled {
-                        self.queued_request = Some(RequestKind::Books);
+                        let completed = self
+                            .watch
+                            .as_ref()
+                            .and_then(|watch| watch.job.as_ref())
+                            .cloned();
+                        if completed
+                            .as_ref()
+                            .is_none_or(|job| !self.start_book_download(context, job))
+                        {
+                            self.queued_request = Some(RequestKind::Books);
+                        }
                     } else {
                         self.schedule_poll(context);
                     }
@@ -3157,6 +3237,12 @@ impl PretNumerique {
                     self.note = Some("The proxy returned an unreadable job response.".to_owned());
                 }
             },
+            RequestKind::Download => {
+                self.watch = None;
+                self.note =
+                    Some("The book is on your Kobo. Return to My Books to open it.".to_owned());
+                self.queued_request = Some(RequestKind::Books);
+            }
             RequestKind::Acknowledge => match parse_job(body) {
                 Some(job) => {
                     self.jobs.retain(|existing| existing.id != job.id);
@@ -3191,6 +3277,14 @@ impl PretNumerique {
             RequestKind::Borrow | RequestKind::Hold | RequestKind::Return | RequestKind::RetryHook
         ) {
             self.watch = None;
+        }
+        if kind == RequestKind::Download {
+            self.watch = None;
+            self.queued_request = Some(RequestKind::Books);
+            self.note = Some(format!(
+                "The loan is active, but the book could not be copied to the Kobo. {advice}"
+            ));
+            return;
         }
         // A 409 and a 404 reach an application as the same refusal, so a
         // rejected borrow or return points at the one screen that can tell the
