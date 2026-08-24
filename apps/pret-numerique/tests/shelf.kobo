@@ -9,7 +9,7 @@ expect On hold
 expect 1 at the front of the queue
 expect not on your home server
 clean
-tap Waiting for you
+tap Waiting for your turn
 wait-for 7th of 7 · 24 August to 24 October 2026
 expect 1st of 4 · 24 August to 17 December 2026
 expect BAnQ

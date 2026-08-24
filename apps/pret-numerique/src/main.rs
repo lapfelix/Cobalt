@@ -393,7 +393,7 @@ impl Paging {
     }
 }
 
-/// One book the libraries say is yours: out on loan, or waiting for you.
+/// One book the libraries say is yours: out on loan, or waiting in a queue.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ShelfEntry {
     publication_handle: String,
@@ -1299,11 +1299,11 @@ impl PretNumerique {
                 .top_bar_action(BACK, "Back"),
             1,
         )
-        .heading("Waiting for you")
-        .text("Your library tells you when one is ready. A hold can only be cancelled from your library account.");
+        .heading("Waiting for your turn")
+        .text("Your library tells you when the reservation is ready. A hold can only be cancelled from your library account.");
         screen = self.note_block(screen, BannerLevel::Info);
         if holds.is_empty() {
-            screen = screen.empty_state("You are not waiting for anything.");
+            screen = screen.empty_state("You have no holds.");
         } else {
             let per_page = self.holds_rows_per_page();
             let paging = Paging::sized(self.holds_page, holds.len(), per_page);
@@ -1619,7 +1619,7 @@ impl PretNumerique {
                 None,
                 [(
                     HOLDS,
-                    "Waiting for you".to_owned(),
+                    "Waiting for your turn".to_owned(),
                     holds_summary(&holds),
                     Glyph::Bookmark,
                 )],

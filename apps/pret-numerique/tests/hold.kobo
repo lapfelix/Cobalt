@@ -18,4 +18,4 @@ expect Your holds are in Library
 clean
 tap Open Library
 wait-for My books
-expect Waiting for you
+expect Waiting for your turn
