@@ -1,6 +1,6 @@
 //! Minimal Linux ABI declarations used by the Kobo runtime profiles.
 //!
-//! Query operations are always available. Mutating panel requests are compiled
+//! Query operations are always available. Mutating HWTCON requests are compiled
 //! only with the explicitly opt-in `device-write` feature.
 
 use std::ffi::{c_int, c_ulong, CString};
@@ -86,17 +86,13 @@ unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
 }
 
-fn ioctl_request(request: u64) -> c_ulong {
-    c_ulong::try_from(request).unwrap_or(c_ulong::MAX)
-}
-
 fn query_ioctl<T>(file: &File, request: u64) -> io::Result<T> {
     let mut value = MaybeUninit::<T>::zeroed();
     // SAFETY: request is a query ioctl whose kernel ABI writes exactly one T.
     let result = unsafe {
         ioctl(
             file.as_raw_fd(),
-            ioctl_request(request),
+            request as c_ulong,
             value.as_mut_ptr().cast::<std::ffi::c_void>(),
         )
     };
@@ -113,7 +109,7 @@ fn query_ioctl_bytes(file: &File, request: u64, bytes: &mut [u8]) -> io::Result<
     let result = unsafe {
         ioctl(
             file.as_raw_fd(),
-            ioctl_request(request),
+            request as c_ulong,
             bytes.as_mut_ptr().cast::<std::ffi::c_void>(),
         )
     };
@@ -131,7 +127,7 @@ fn mutating_ioctl<T>(file: &File, request: u64, value: &mut T) -> io::Result<()>
     let result = unsafe {
         ioctl(
             file.as_raw_fd(),
-            ioctl_request(request),
+            request as c_ulong,
             std::ptr::from_mut(value).cast::<std::ffi::c_void>(),
         )
     };
@@ -149,7 +145,7 @@ fn mutating_ioctl<T>(file: &File, request: u64, value: &mut T) -> io::Result<()>
 fn value_ioctl(file: &File, request: u64, value: c_int) -> io::Result<()> {
     // SAFETY: this request takes its argument by value; no memory is read
     // through it.
-    let result = unsafe { ioctl(file.as_raw_fd(), ioctl_request(request), value) };
+    let result = unsafe { ioctl(file.as_raw_fd(), request as c_ulong, value) };
     if result < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -388,18 +384,6 @@ pub mod input {
     pub const EV_SYN: u16 = 0x00;
     pub const EV_KEY: u16 = 0x01;
     pub const EV_ABS: u16 = 0x03;
-    pub const EV_MSC: u16 = 0x04;
-    /// The one `EV_MSC` code the NTX kernels use: digested accelerometer
-    /// orientation, delivered on the `gpio-keys` node.
-    pub const MSC_RAW: u16 = 0x03;
-    /// The power button, as `gpio-keys` reports it.
-    pub const KEY_POWER: u16 = 116;
-    /// The page-turn keys on devices that have them. Linux names these
-    /// `KEY_F23` and `KEY_F24`; which one means "forward" depends on how the
-    /// reader is held, so the codes stay neutral here and the meaning is
-    /// assigned where the pose is known. Captured on a Libra 2 on 2026-08-23.
-    pub const KEY_PAGE_193: u16 = 193;
-    pub const KEY_PAGE_194: u16 = 194;
     pub const SYN_REPORT: u16 = 0;
     pub const BTN_TOUCH: u16 = 330;
 
@@ -691,8 +675,7 @@ pub mod mxcfb {
 /// the unprivileged `nobody` identity. A seccomp filter permits local Unix
 /// sockets but refuses network sockets and prevents descendants from escaping
 /// their process group. If seccomp is unavailable, a private network namespace
-/// provides the network boundary instead. Older ARM vendor kernels that expose
-/// neither are supervised by an equivalent userspace syscall filter.
+/// provides the network boundary instead.
 pub mod sandbox {
     #[cfg(target_os = "linux")]
     use std::fs;
@@ -701,22 +684,12 @@ pub mod sandbox {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::process::CommandExt;
     use std::path::Path;
-    #[cfg(all(target_os = "linux", target_arch = "arm"))]
-    use std::process::Child;
     use std::process::Command;
 
     #[cfg(target_os = "linux")]
     use std::ffi::CString;
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt;
-    #[cfg(all(target_os = "linux", target_arch = "arm"))]
-    use std::sync::atomic::{AtomicBool, Ordering};
-    #[cfg(all(target_os = "linux", target_arch = "arm"))]
-    use std::sync::{Arc, Mutex};
-    #[cfg(all(target_os = "linux", target_arch = "arm"))]
-    use std::thread;
-    #[cfg(all(target_os = "linux", target_arch = "arm"))]
-    use std::time::{Duration, Instant};
 
     #[cfg(target_os = "linux")]
     const UNPRIVILEGED_ID: libc::uid_t = 65_534;
@@ -725,8 +698,6 @@ pub mod sandbox {
     pub struct Sandbox {
         #[cfg(target_os = "linux")]
         root: CString,
-        #[cfg(all(target_os = "linux", target_arch = "arm"))]
-        trace_syscalls: bool,
     }
 
     impl Sandbox {
@@ -741,15 +712,7 @@ pub mod sandbox {
                 let root = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "sandbox path has NUL")
                 })?;
-                Ok(Self {
-                    root,
-                    #[cfg(target_arch = "arm")]
-                    // Kobo's 4.1 i.MX6SLL kernel exposes neither seccomp BPF
-                    // nor network namespaces. An absent net namespace is a
-                    // stable signal that the child needs the ptrace fallback;
-                    // newer kernels retain the cheaper in-kernel filter.
-                    trace_syscalls: !Path::new("/proc/self/ns/net").exists(),
-                })
+                Ok(Self { root })
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -761,18 +724,7 @@ pub mod sandbox {
         /// Configures `command` to enter this sandbox after fork and before
         /// exec. Keeping the unsafe hook inside the ABI crate means callers
         /// cannot accidentally run the transition in their own process.
-        pub fn configure(self, command: &mut Command) -> bool {
-            #[cfg(target_os = "linux")]
-            let trace_syscalls = {
-                #[cfg(target_arch = "arm")]
-                {
-                    self.trace_syscalls
-                }
-                #[cfg(not(target_arch = "arm"))]
-                {
-                    false
-                }
-            };
+        pub fn configure(self, command: &mut Command) {
             #[cfg(target_os = "linux")]
             // SAFETY: Command runs this only in the freshly forked child. The
             // prepared sandbox owns every byte the closure reads.
@@ -783,14 +735,6 @@ pub mod sandbox {
             {
                 let _ = self;
                 command.process_group(0);
-            }
-            #[cfg(target_os = "linux")]
-            {
-                trace_syscalls
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                false
             }
         }
 
@@ -908,36 +852,6 @@ pub mod sandbox {
             u32::try_from(number).unwrap_or(u32::MAX)
         }
 
-        // Some architectures have no fork or vfork syscall at all, and libc
-        // defines no number for them: the C library implements both by calling
-        // clone, which this filter blocks in its own right. The device is
-        // armv7, where both numbers exist and the filter below is unchanged.
-        // This arm exists only so the workspace builds on such a development
-        // machine, arm64 Linux being the one people actually hit.
-        //
-        // The two slots are kept rather than removed. Every jump in the filter
-        // carries a relative offset -- socket lands on the AF_UNIX check, the
-        // rest land on RET ERRNO -- so dropping an instruction would silently
-        // retarget every jump above it. u32::MAX matches no syscall, which is
-        // the same fallback syscall() already uses, and leaves the offsets and
-        // the meaning of the program exactly as they are elsewhere.
-        //
-        // The list names the architectures that lack the calls, so that an
-        // unlisted future one fails to compile here rather than quietly
-        // dropping two entries from the filter.
-        #[cfg(any(
-            target_arch = "aarch64",
-            target_arch = "riscv64",
-            target_arch = "loongarch64"
-        ))]
-        let fork_calls: [u32; 2] = [u32::MAX, u32::MAX];
-        #[cfg(not(any(
-            target_arch = "aarch64",
-            target_arch = "riscv64",
-            target_arch = "loongarch64"
-        )))]
-        let fork_calls: [u32; 2] = [syscall(libc::SYS_fork), syscall(libc::SYS_vfork)];
-
         // seccomp_data.nr is at byte 0 and args[0] at byte 16 on the little-
         // endian ARM and x86 Linux targets supported by this workspace. SDK
         // applications are single-process event loops; their asynchronous work
@@ -951,8 +865,8 @@ pub mod sandbox {
             jump(syscall(libc::SYS_setpgid), 9, 0),
             jump(syscall(libc::SYS_unshare), 8, 0),
             jump(syscall(libc::SYS_setns), 7, 0),
-            jump(fork_calls[0], 6, 0),
-            jump(fork_calls[1], 5, 0),
+            jump(syscall(libc::SYS_fork), 6, 0),
+            jump(syscall(libc::SYS_vfork), 5, 0),
             jump(syscall(libc::SYS_clone), 4, 0),
             jump(syscall(libc::SYS_clone3), 3, 0),
             statement(RET_K, libc::SECCOMP_RET_ALLOW),
@@ -974,31 +888,6 @@ pub mod sandbox {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
-        }
-    }
-
-    /// Whether this kernel can put a network boundary around an application.
-    ///
-    /// True when either mechanism [`Sandbox::enter`] uses is available: a
-    /// seccomp filter, probed with `PR_GET_SECCOMP` (which a kernel built
-    /// without `CONFIG_SECCOMP` answers with `EINVAL`), or a private network
-    /// namespace, probed by the file the kernel publishes for it. Read-only:
-    /// nothing is installed or unshared.
-    ///
-    /// Off Linux there is no sandbox to put a boundary around: [`is_root`]
-    /// answers false there, so [`Sandbox::enter`] is never reached. Answering
-    /// true keeps a development host from logging a degradation it is not in.
-    #[must_use]
-    pub fn network_boundary_available() -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            // SAFETY: PR_GET_SECCOMP reads the current mode and changes nothing.
-            let seccomp = unsafe { libc::prctl(libc::PR_GET_SECCOMP) } >= 0;
-            seccomp || Path::new("/proc/self/ns/net").exists()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            true
         }
     }
 
@@ -1589,7 +1478,7 @@ mod pty_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{hwtcon, input, ior, iow, iowr, mxcfb};
+    use super::{hwtcon, input, ior, iow, iowr};
     #[cfg(feature = "device-write")]
     use std::fs::File;
 
@@ -1626,73 +1515,15 @@ mod tests {
         assert_eq!(input::EVIOCGABS_MT_POSITION_Y, 0x8018_4576);
         assert_eq!(hwtcon::HWTCON_SEND_UPDATE, 0x4024_462e);
         assert_eq!(hwtcon::HWTCON_WAIT_FOR_UPDATE_COMPLETE, 0xc008_462f);
-        assert_eq!(mxcfb::MXCFB_SEND_UPDATE, 0x4048_462e);
-        assert_eq!(mxcfb::MXCFB_WAIT_FOR_UPDATE_COMPLETE, 0xc008_462f);
         assert_eq!(ior(b'E', 0x75, 24), 0x8018_4575);
         assert_eq!(iow(b'F', 0x2e, 36), 0x4024_462e);
-        assert_eq!(iow(b'F', 0x2e, 72), 0x4048_462e);
         assert_eq!(iowr(b'F', 0x2f, 8), 0xc008_462f);
     }
 
-    /// The two backends share a number here, and that is not a coincidence to
-    /// be tidied away: the marker struct is the same eight bytes on both, so
-    /// the wait half of the interface needs no second implementation.
     #[test]
-    fn both_backends_wait_on_the_same_request() {
-        assert_eq!(
-            hwtcon::HWTCON_WAIT_FOR_UPDATE_COMPLETE,
-            mxcfb::MXCFB_WAIT_FOR_UPDATE_COMPLETE
-        );
-        assert_ne!(hwtcon::HWTCON_SEND_UPDATE, mxcfb::MXCFB_SEND_UPDATE);
-    }
-
-    /// A waveform constant taken from the wrong backend does not fail: it
-    /// draws the wrong thing. Ask an i.MX6 panel for hwtcon's `GL16` and it
-    /// runs `GC4`; ask it for hwtcon's `A2` and it runs `GLR16`.
-    #[test]
-    fn the_two_backends_number_their_waveforms_differently() {
+    fn hwtcon_waveforms_do_not_reuse_mxcfb_values() {
         assert_eq!(hwtcon::WAVEFORM_GLR16, 4);
         assert_eq!(hwtcon::WAVEFORM_A2, 6);
-        assert_eq!(mxcfb::WAVEFORM_GL16, 5);
-        assert_eq!(mxcfb::WAVEFORM_A2, 4);
-        assert_ne!(hwtcon::WAVEFORM_GL16, mxcfb::WAVEFORM_GL16);
-        assert_ne!(hwtcon::WAVEFORM_A2, mxcfb::WAVEFORM_A2);
-
-        // The three the two backends genuinely agree on.
-        assert_eq!(hwtcon::WAVEFORM_INIT, mxcfb::WAVEFORM_INIT);
-        assert_eq!(hwtcon::WAVEFORM_DU, mxcfb::WAVEFORM_DU);
-        assert_eq!(hwtcon::WAVEFORM_GC16, mxcfb::WAVEFORM_GC16);
-        assert_eq!(hwtcon::WAVEFORM_AUTO, mxcfb::WAVEFORM_AUTO);
-    }
-
-    #[test]
-    fn mxcfb_offsets_match_vendor_c_layout() {
-        use std::mem::offset_of;
-
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, update_region), 0);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, waveform_mode), 16);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, update_mode), 20);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, update_marker), 24);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, temp), 28);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, flags), 32);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, dither_mode), 36);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, quant_bit), 40);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateData, alt_buffer_data), 44);
-
-        assert_eq!(offset_of!(mxcfb::MxcfbAltBufferData, phys_addr), 0);
-        assert_eq!(offset_of!(mxcfb::MxcfbAltBufferData, width), 4);
-        assert_eq!(offset_of!(mxcfb::MxcfbAltBufferData, height), 8);
-        assert_eq!(offset_of!(mxcfb::MxcfbAltBufferData, alt_update_region), 12);
-
-        // Without these, swapping `top` and `left` would keep every size and
-        // every offset above correct, and put every update in the wrong place.
-        assert_eq!(offset_of!(mxcfb::MxcfbRect, top), 0);
-        assert_eq!(offset_of!(mxcfb::MxcfbRect, left), 4);
-        assert_eq!(offset_of!(mxcfb::MxcfbRect, width), 8);
-        assert_eq!(offset_of!(mxcfb::MxcfbRect, height), 12);
-
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateMarkerData, update_marker), 0);
-        assert_eq!(offset_of!(mxcfb::MxcfbUpdateMarkerData, collision_test), 4);
     }
 
     #[test]
@@ -1714,11 +1545,7 @@ mod tests {
             hwtcon::send_update;
         let wait: fn(&File, &mut hwtcon::HwtconUpdateMarkerData) -> std::io::Result<()> =
             hwtcon::wait_for_update_complete;
-        let mxcfb_send: fn(&File, &mut mxcfb::MxcfbUpdateData) -> std::io::Result<()> =
-            mxcfb::send_update;
-        let mxcfb_wait: fn(&File, &mut mxcfb::MxcfbUpdateMarkerData) -> std::io::Result<()> =
-            mxcfb::wait_for_update_complete;
-        let _ = (send, wait, mxcfb_send, mxcfb_wait);
+        let _ = (send, wait);
     }
 }
 

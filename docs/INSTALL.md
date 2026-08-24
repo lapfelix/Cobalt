@@ -5,10 +5,9 @@ USB, what to do if a step does not go as described, and how to take it back
 off. Part of [Cobalt](../README.md).
 
 The procedure below is fully hardware-tested on the **Kobo Clara BW N365
-(device code 391), firmware 4.45.23697**, the **Kobo Elipsa 2E N605 (device
-code 389), firmware 4.38.23697**, and the **Kobo Clara HD N249 (device code
-376), firmware 4.38.23684 or 4.38.23697**. Support remains tied to the exact
-firmware, kernel, framebuffer, touch, and identity combination in the
+(device code 391), firmware 4.45.23697** and the **Kobo Elipsa 2E N605 (device
+code 389), firmware 4.38.23697**. Support remains tied to the exact firmware,
+kernel, framebuffer, touch, and identity combination in the
 [device support matrix](DEVICES.md#device-support-matrix).
 
 Display and synthetic-touch writes require an exact match of framebuffer
