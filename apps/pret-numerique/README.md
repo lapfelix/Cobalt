@@ -30,13 +30,14 @@ Store stay reachable through a second menu entry that presents the launcher.
 ## Paging
 
 E Ink does not scroll, so every long list is paged with `Previous page` and
-`Next page` buttons, and the one with nowhere to go is drawn disabled rather
-than removed: a control that comes and goes moves the other one under the
-reader's thumb between pages. Whether there is another page of a browse is the
-server's answer, never a count of the rows in hand -- a merged list can end on
-a full page, and a client that guessed from the count would offer a page that
-is not there. Lists the app holds all of (search results, subjects, loans,
-holds, a book's neighbours) know their own ends.
+`Next page` buttons. A list with only one page has no pager band; on a
+multi-page list, the unavailable direction remains disabled so the other
+button does not move under the reader's thumb between pages. Whether there is
+another page of a browse is the server's answer, never a count of the rows in
+hand -- a merged list can end on a full page, and a client that guessed from
+the count would offer a page that is not there. Lists the app holds all of
+(search results, subjects, loans, holds, a book's neighbours) know their own
+ends.
 
 How many rows a page holds comes from the panel, which the runtime states during
 the handshake: a Clara holds five under a heading and the page controls, a Nia

@@ -2987,6 +2987,11 @@ impl PretNumerique {
             self.start_bookstore_category(context);
             return;
         }
+        if kind == RequestKind::BookstoreCategory {
+            self.bookstore_category_state = Some("unknown".to_owned());
+            self.bookstore_category = None;
+            return;
+        }
         let advice = Failure::of(error).advice;
         if matches!(
             kind,
@@ -5933,6 +5938,32 @@ mod tests {
             .note
             .as_deref()
             .is_some_and(|note| note.contains("nothing was returned")));
+    }
+
+    #[test]
+    fn optional_book_enrichment_failure_does_not_hide_the_detail_screen() {
+        typeset();
+        let mut app = PretNumerique {
+            view: View::Detail,
+            detail: Some(described(publication("Book", vec![source()]))),
+            ..PretNumerique::default()
+        };
+        let mut context = Context::default();
+        app.handle_failed(&mut context, super::RequestKind::Cover, TaskError::NotFound);
+        assert_eq!(app.note, None);
+        app.handle_failed(
+            &mut context,
+            super::RequestKind::BookstoreCategory,
+            TaskError::NotFound,
+        );
+        assert_eq!(app.note, None);
+        let drawn = format!("{:?}", app.detail_screen());
+        assert!(drawn.contains("About this book"), "{drawn}");
+        assert!(drawn.contains("On the desert world Arrakis"), "{drawn}");
+        assert!(
+            !drawn.contains("The service had nothing to return"),
+            "{drawn}"
+        );
     }
 
     #[test]
