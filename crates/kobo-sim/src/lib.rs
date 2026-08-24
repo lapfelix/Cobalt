@@ -2578,19 +2578,59 @@ fn pret_browse_body(query: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn pret_related_body() -> Vec<u8> {
+fn pret_related_body(basis: Option<&str>) -> Vec<u8> {
     let publications = [
-        pret_publication_with_basis(7, "series"),
-        pret_publication_with_basis(3, "author"),
-        pret_publication_with_basis(4, "author"),
-        pret_publication_with_basis(5, "author"),
-        pret_publication_with_basis(6, "author"),
+        (7, "series"),
+        (3, "author"),
+        (4, "author"),
+        (5, "author"),
+        (6, "author"),
+        (1, "subject"),
+        (8, "subject"),
     ]
     .into_iter()
-    .flatten()
+    .filter(|(_, candidate_basis)| basis.is_none_or(|basis| basis == *candidate_basis))
+    .filter_map(|(index, candidate_basis)| pret_publication_with_basis(index, candidate_basis))
     .collect::<Vec<_>>()
     .join(",");
     format!(r#"{{"publications":[{publications}]}}"#).into_bytes()
+}
+
+/// A deterministic PNC1 cover so the simulator exercises the same cover
+/// placement and decode path as a reader with a catalogue image. It is a
+/// simple bordered texture rather than a real publisher asset: the visual
+/// question here is whether the right-hand picture steals room from the title,
+/// facts, or library action.
+fn pret_cover_body() -> Vec<u8> {
+    const WIDTH: usize = 260;
+    const HEIGHT: usize = 419;
+    let mut body = vec![b'P', b'N', b'C', b'1', 0, 1, 0, 0];
+    body[4] = (WIDTH >> 8) as u8;
+    body[5] = WIDTH as u8;
+    body[6] = (HEIGHT >> 8) as u8;
+    body[7] = HEIGHT as u8;
+    let pixels = WIDTH * HEIGHT;
+    for index in (0..pixels).step_by(2) {
+        let first = index / WIDTH;
+        let first_x = index % WIDTH;
+        let shade = |x: usize, y: usize| {
+            if x < 8 || x >= WIDTH - 8 || y < 8 || y >= HEIGHT - 8 {
+                1
+            } else if (x / 20 + y / 20) % 2 == 0 {
+                12
+            } else {
+                5
+            }
+        };
+        let high = shade(first_x, first);
+        let low = if index + 1 < pixels {
+            shade((index + 1) % WIDTH, (index + 1) / WIDTH)
+        } else {
+            0
+        };
+        body.push((high << 4) | low);
+    }
+    body
 }
 
 /// What the libraries themselves say is out and waiting.
@@ -2660,8 +2700,11 @@ fn pret_fixture_fetch(
         "/categories" => pret_categories_body(),
         "/browse" => pret_browse_body(query),
         "/shelf" => pret_shelf_body(),
+        _ if path.starts_with("/publications/") && path.ends_with("/cover") => {
+            pret_cover_body()
+        }
         _ if path.starts_with("/publications/") && path.ends_with("/related") => {
-            pret_related_body()
+            pret_related_body(pret_query(query, "basis").as_deref())
         }
         _ => {
             let Some(id) = path.strip_prefix("/jobs/") else {
@@ -3956,6 +3999,9 @@ mod tests {
 
         let related = pret_get("/publications/fixture-triplettes/related");
         assert!(related.contains("Les mains sur le volant"));
+        let subject = pret_get("/publications/fixture-triplettes/related?basis=subject");
+        assert!(subject.contains("Qui va séduire Henry ?"));
+        assert!(!subject.contains("Les mains sur le volant"));
     }
 
     #[test]

@@ -127,6 +127,9 @@ const SUBMIT_SEARCH: &str = "submit-search";
 const FILTER_ALL: &str = "filter-all";
 const FILTER_MONTREAL: &str = "filter-montreal";
 const FILTER_BANQ: &str = "filter-banq";
+const RELATED_SERIES: &str = "related-series";
+const RELATED_AUTHOR: &str = "related-author";
+const RELATED_SUBJECT: &str = "related-subject";
 const REFRESH: &str = "refresh";
 const CONFIRM_RETURN: &str = "confirm-return";
 const RETRY_HOOK: &str = "retry-hook";
@@ -538,6 +541,7 @@ struct PretNumerique {
     browse_from_end: bool,
     related: Vec<Publication>,
     related_page: usize,
+    related_basis: Option<String>,
     detail: Option<Publication>,
     cover: Option<TilePicture>,
     bookstore_category: Option<String>,
@@ -602,6 +606,7 @@ impl Default for PretNumerique {
             browse_from_end: false,
             related: Vec::new(),
             related_page: 0,
+            related_basis: None,
             detail: None,
             cover: None,
             bookstore_category: None,
@@ -1138,9 +1143,67 @@ impl PretNumerique {
     /// display type set across two lines of it costs a row of the list it is
     /// introducing.
     fn related_screen(&self) -> Screen {
+        if self.related_basis.is_none() && self.related.is_empty() {
+            let mut screen = Self::nav(
+                ScreenBuilder::new("related")
+                    .top_bar("Explore this book")
+                    .top_bar_action(BACK, "Back"),
+                0,
+            );
+            screen = self
+                .note_block(screen, BannerLevel::Attention)
+                .heading("Find your next read");
+            let mut rows = Vec::new();
+            if let Some(description) = self
+                .detail
+                .as_ref()
+                .and_then(|book| book.description.as_ref())
+            {
+                rows.push((
+                    DESCRIPTION.to_owned(),
+                    "Read full description".to_owned(),
+                    compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS),
+                    Glyph::Book,
+                ));
+            }
+            if let Some(series) = self.detail.as_ref().and_then(|book| book.series.as_ref()) {
+                rows.push((
+                    RELATED_SERIES.to_owned(),
+                    "More in this series".to_owned(),
+                    series
+                        .position
+                        .as_ref()
+                        .map(|position| format!("{} · starting at {}", series.name, position))
+                        .unwrap_or_else(|| series.name.clone()),
+                    Glyph::Book,
+                ));
+            }
+            if let Some(author) = self.detail.as_ref().and_then(|book| book.authors.first()) {
+                rows.push((
+                    RELATED_AUTHOR.to_owned(),
+                    "More by this author".to_owned(),
+                    author.clone(),
+                    Glyph::Circle,
+                ));
+            }
+            rows.push((
+                RELATED_SUBJECT.to_owned(),
+                "Similar books".to_owned(),
+                "Same subjects and nearby catalogue picks".to_owned(),
+                Glyph::Book,
+            ));
+            return screen.section_rows("Explore", None, rows).build();
+        }
+
+        let title = match self.related_basis.as_deref() {
+            Some("series") => "More in this series",
+            Some("author") => "More by this author",
+            Some("subject") => "Similar books",
+            _ => "Related books",
+        };
         let mut screen = Self::nav(
             ScreenBuilder::new("related")
-                .top_bar("Related books")
+                .top_bar(title)
                 .top_bar_action(BACK, "Back"),
             0,
         )
@@ -1148,8 +1211,13 @@ impl PretNumerique {
             self.detail
                 .as_ref()
                 .and_then(|book| book.series.as_ref())
-                .map(|series| format!("More in {} first, then by author and subject.", series.name))
-                .unwrap_or_else(|| "More by this author and on the same subjects.".to_owned()),
+                .filter(|_| self.related_basis.as_deref() == Some("series"))
+                .map(|series| format!("Series: {}", series.name))
+                .or_else(|| {
+                    (self.related_basis.as_deref() == Some("author"))
+                        .then(|| "The author's other books in your libraries.".to_owned())
+                })
+                .unwrap_or_else(|| "Similar books from the same subjects.".to_owned()),
         );
         screen = self.note_block(screen, BannerLevel::Attention);
         if self.related.is_empty() && self.awaiting(RequestKind::Related) {
@@ -1223,9 +1291,7 @@ impl PretNumerique {
                 // consume the optional rows on a Clara, but the full blurb
                 // must remain one tap away even then.
                 .compose(|mut screen| {
-                    if result.description.is_some()
-                        && (self.cover.is_some() || self.note.is_some() || self.watch.is_some())
-                    {
+                    if result.description.is_some() && result.related_handle().is_none() {
                         screen = screen.top_bar_action(DESCRIPTION, "Description");
                     }
                     if result.related_handle().is_some() {
@@ -1297,12 +1363,12 @@ impl PretNumerique {
         // the panel has room: the layout engine stops at the bottom of the
         // content area and drops the rest in silence, and what it would drop
         // here is the control the reader came for.
-        let slots = self.detail_extras();
+        let mut slots = self.detail_extras();
         // The opening of the blurb, and the way into the rest of it. A row
         // rather than the paragraph this was, because a description runs to
         // thousands of characters and a book's screen has room for two lines of
         // them: what it can honestly offer is a taste and a tap.
-        if let Some(description) = result.description.as_ref().filter(|_| slots >= 2) {
+        if let Some(description) = result.description.as_ref().filter(|_| slots > 0) {
             screen = screen.section_rows(
                 "About this book",
                 None,
@@ -1313,24 +1379,63 @@ impl PretNumerique {
                     Glyph::Book,
                 )],
             );
+            slots = slots.saturating_sub(1);
+        }
+        // The series is the most useful related path when it exists. It follows
+        // the primary actions and remains available in the Explore menu even
+        // when the compact panel has no room for this inline row.
+        if slots > 0 {
+            if let Some(series) = result.series.as_ref() {
+                screen = screen.section_rows(
+                    "More in this series",
+                    None,
+                    [(
+                        RELATED_SERIES.to_owned(),
+                        series.name.clone(),
+                        series
+                            .position
+                            .as_ref()
+                            .map(|position| format!("Starting at {position}"))
+                            .unwrap_or_default(),
+                        Glyph::Book,
+                    )],
+                );
+                slots = slots.saturating_sub(1);
+            }
         }
         // The first author only. A book with four of them has four rows on a
         // panel with room for one, and the first is the one a reader means.
         // It follows the book's own description: the reader first learns what
         // this title is, then decides whether to browse the author's others.
-        if slots >= 1 {
+        if slots > 0 {
             if let Some(author) = result.authors.first() {
                 screen = screen.section_rows(
                     "More by this author",
                     None,
                     [(
-                        "author.0".to_owned(),
+                        RELATED_AUTHOR.to_owned(),
                         author.clone(),
                         String::new(),
                         Glyph::Circle,
                     )],
                 );
+                slots = slots.saturating_sub(1);
             }
+        }
+        // Similar books is the final compact path. It is always present in
+        // the Explore chooser, but appears inline when the panel has room
+        // after the description, series, and author rows.
+        if slots > 0 {
+            screen = screen.section_rows(
+                "Similar books",
+                None,
+                [(
+                    RELATED_SUBJECT.to_owned(),
+                    "Same subjects and nearby picks".to_owned(),
+                    String::new(),
+                    Glyph::Book,
+                )],
+            );
         }
         screen.build()
     }
@@ -2483,7 +2588,7 @@ impl PretNumerique {
         self.start_read(context, RequestKind::Browse, url, 192 * 1024);
     }
 
-    fn start_related(&mut self, context: &mut Context) {
+    fn start_related(&mut self, context: &mut Context, basis: Option<&str>) {
         let Some(handle) = self
             .detail
             .as_ref()
@@ -2492,12 +2597,17 @@ impl PretNumerique {
         else {
             return;
         };
+        let basis_filter = basis.filter(|value| *value != "all");
+        self.related_basis = Some(basis.unwrap_or("all").to_owned());
         self.related.clear();
         self.related_page = 0;
+        let basis_query = basis_filter
+            .map(|basis| format!("?basis={}", percent_encode(basis)))
+            .unwrap_or_default();
         self.start_read(
             context,
             RequestKind::Related,
-            format!("{API}/publications/{handle}/related"),
+            format!("{API}/publications/{handle}/related{basis_query}"),
             128 * 1024,
         );
     }
@@ -2777,7 +2887,9 @@ impl PretNumerique {
                 true
             }
             Some(RequestKind::Related) => {
-                self.start_related(context);
+                if let Some(basis) = self.related_basis.clone() {
+                    self.start_related(context, Some(&basis));
+                }
                 true
             }
             Some(RequestKind::Search) => {
@@ -3222,6 +3334,9 @@ impl PretNumerique {
         self.bookstore_category_state = None;
         self.bookstore_category_handle = None;
         self.detail = Some(publication);
+        self.related.clear();
+        self.related_page = 0;
+        self.related_basis = None;
         self.selected_source = 0;
         self.start_cover(context);
         self.show(context);
@@ -3491,8 +3606,29 @@ impl KoboApp for PretNumerique {
         }
         if action == action_id(RELATED) {
             self.deeper(context, View::Related);
-            self.start_related(context);
+            // Explore is a small chooser first. The reader can then choose a
+            // useful relationship instead of landing in an opaque mixed list;
+            // each choice remains a normal paged list with its reason in the
+            // row summary.
+            self.related_basis = None;
+            self.related.clear();
+            self.related_page = 0;
+            self.show(context);
             return;
+        }
+        for (action_name, basis) in [
+            (RELATED_SERIES, "series"),
+            (RELATED_AUTHOR, "author"),
+            (RELATED_SUBJECT, "subject"),
+        ] {
+            if action == action_id(action_name) {
+                if self.view != View::Related {
+                    self.deeper(context, View::Related);
+                }
+                self.related_basis = Some(basis.to_owned());
+                self.start_related(context, Some(basis));
+                return;
+            }
         }
         if action == action_id(DESCRIPTION) {
             self.deeper(context, View::Description);
@@ -3562,7 +3698,13 @@ impl KoboApp for PretNumerique {
                 View::Categories => self.start_categories(context),
                 View::BookstoreCategories => self.start_bookstore_categories(context),
                 View::Browse => self.start_browse(context),
-                View::Related => self.start_related(context),
+                View::Related => {
+                    if let Some(basis) = self.related_basis.clone() {
+                        self.start_related(context, Some(&basis));
+                    } else {
+                        self.show(context);
+                    }
+                }
                 View::Library | View::Holds => {
                     // A finished request has had its say; one still running has
                     // not, so a refresh does not throw its progress away.
@@ -4645,7 +4787,11 @@ fn parse_recommendations(result: &Value) -> Vec<Recommendation> {
                             .or_else(|| recommendation.get("constellationFavorite"))
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
-                        difficulty: recommendation.get("difficulty").and_then(Value::as_i64),
+                        difficulty: recommendation.get("difficulty").and_then(|value| {
+                            value
+                                .as_i64()
+                                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                        }),
                     })
                 })
                 .collect()
@@ -5186,7 +5332,7 @@ mod tests {
         unresolved_summary, Book, BookstoreCategory, BrowseQuery, Category, Group, Job, Paging,
         PretNumerique, Publication, ShelfEntry, Sort, Source, View, Watch, ACKNOWLEDGE, API, BACK,
         CONFIRM_RETURN, DESCRIPTION, FILTERS, NEXT_PAGE, PREVIOUS_PAGE, READER, RELATED,
-        RETRY_HOOK, SEARCH, SHOW_PDF, SUBMIT_SEARCH,
+        RELATED_SERIES, RELATED_SUBJECT, RETRY_HOOK, SEARCH, SHOW_PDF, SUBMIT_SEARCH,
     };
     use kobo_sdk::{
         action_id, AppRunner, BannerLevel, Command, Context, DiagnosticSeverity, KoboApp,
@@ -7564,10 +7710,18 @@ mod tests {
         assert!(format!("{:?}", app.app().detail_screen()).contains("Explore"));
         let commands = app.action(action_id(RELATED));
         assert_eq!(app.app().view, View::Related);
-        let url = fetched(commands).expect("neighbours are asked for");
+        assert!(
+            fetched(commands).is_none(),
+            "Explore first shows its choices"
+        );
+        let menu = format!("{:?}", app.app().related_screen());
+        assert!(menu.contains("Explore this book"));
+        assert!(menu.contains("Similar books"));
+        let commands = app.action(action_id(RELATED_SUBJECT));
+        let url = fetched(commands).expect("similar books are asked for");
         assert_eq!(
             url,
-            format!("{API}/publications/Fixture%20title-handle/related")
+            format!("{API}/publications/Fixture%20title-handle/related?basis=subject")
         );
 
         let mut app = PretNumerique {
@@ -7588,6 +7742,33 @@ mod tests {
         let second = format!("{:?}", app.related_screen());
         assert!(second.contains(&format!("Neighbour {}", related_rows() + 1)));
         assert_eq!(second.matches("state: Disabled").count(), 1);
+    }
+
+    #[test]
+    fn explore_offers_series_author_and_similar_paths() {
+        let mut app = AppRunner::new(PretNumerique {
+            view: View::Detail,
+            detail: Some(Publication {
+                series: Some(super::SeriesInfo {
+                    name: "Les aventures de Zoé".to_owned(),
+                    position: Some("2".to_owned()),
+                }),
+                authors: vec!["Marie-Ève Larochelle".to_owned()],
+                ..publication("Fixture title", vec![source()])
+            }),
+            ..PretNumerique::default()
+        });
+        app.start();
+        app.action(action_id(RELATED));
+        let menu = format!("{:?}", app.app().related_screen());
+        assert!(menu.contains("More in this series"));
+        assert!(menu.contains("More by this author"));
+        assert!(menu.contains("Similar books"));
+
+        let commands = app.action(action_id(RELATED_SERIES));
+        assert_eq!(app.app().view, View::Related);
+        let url = fetched(commands).expect("series books are asked for");
+        assert!(url.ends_with("/related?basis=series"), "{url}");
     }
 
     #[test]
