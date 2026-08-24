@@ -1285,7 +1285,12 @@ fn host_applications(
                         || Chrome::with_back(!at_home),
                         |screen| chrome_for(screen, at_home, &mut status),
                     );
-                    let quick_input = screen.as_ref().is_some_and(is_keyboard_screen);
+                    // A key is not given a pressed state. It would cost two more
+                    // panel updates per keystroke (one to invert, one to put it
+                    // back) for feedback the letter appearing in the field gives
+                    // anyway, and typing is the one place where the number of
+                    // updates is what the reader feels.
+                    let typing = screen.as_ref().is_some_and(is_keyboard_screen);
                     // A control shows that it has been touched, before
                     // anything it does can be seen. Without this the panel is
                     // simply still for as long as the application takes to
@@ -1301,7 +1306,7 @@ fn host_applications(
                             TouchEvent::Down { x, y } => {
                                 if let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) {
                                     landed = Some((Instant::now(), x, y));
-                                    if !quick_input {
+                                    if !typing {
                                         if let Some(rect) = current
                                             .layout_with(&metrics_for(current), &chrome)
                                             .pressed_control(x, y)
@@ -1412,9 +1417,7 @@ fn host_applications(
                                 screen.reading_font = apps[index].fonts.get(&local).copied();
                             }
                             let is_front = id == front;
-                            let quick_input =
-                                apps[index].screen.as_ref().is_some_and(is_keyboard_screen)
-                                    && is_keyboard_screen(&screen);
+                            let keyboard = keyboard_change(apps[index].screen.as_ref(), &screen);
                             if is_front {
                                 last_activity = Instant::now();
                             }
@@ -1445,10 +1448,21 @@ fn host_applications(
                                     &mut surface,
                                     None,
                                 );
-                                if quick_input {
-                                    panel.paint_fast(display, whole_screen, &surface)?;
-                                } else {
-                                    panel.paint(display, whole_screen, &surface)?;
+                                let painted = match keyboard {
+                                    KeyboardChange::Typed => {
+                                        panel.paint_fast(display, whole_screen, &surface)?
+                                    }
+                                    KeyboardChange::Relabelled | KeyboardChange::Closed => {
+                                        panel.paint_clearing(display, whole_screen, &surface)?
+                                    }
+                                    KeyboardChange::Other => {
+                                        panel.paint(display, whole_screen, &surface)?
+                                    }
+                                };
+                                if let Some(painted) =
+                                    painted.filter(|painted| painted.total() >= SLOW_PAINT)
+                                {
+                                    trace(&format!("slow frame: {}", painted.describe()));
                                 }
                                 apps[index].painted += 1;
                             }
@@ -2251,10 +2265,10 @@ fn evict(apps: &mut Vec<Hosted>, front: u64) {
 /// neither is an empty list.
 ///
 /// An application with work in flight is not cold, however long ago it was
-/// last on the panel. Somebody who starts a three minute audiobook and reads
-/// the news while it writes has not abandoned it, and stopping it would throw
-/// away minutes of work that was proceeding correctly, silently, and with
-/// nothing on the panel to say so. Such an application is stopped only when
+/// last on the panel. Somebody who leaves a long download running and reads
+/// something else while it finishes has not abandoned it, and stopping it
+/// would throw away minutes of work that was proceeding correctly, silently,
+/// and with nothing on the panel to say so. Such an application is stopped only when
 /// every other candidate is busy too, because refusing to open anything is
 /// worse still.
 fn coldest(seen: &[(u64, Instant, bool)], front: u64) -> Option<usize> {
@@ -2360,15 +2374,8 @@ fn start_application(
             let _ = waker.send(Event::TaskReady);
         }))
         .with_capabilities(declared.iter());
-    let shelf_root = if name == "audiobook" {
-        // `.mp3z` is the firmware's sideloaded-audiobook container. Keeping
-        // this one privileged shelf in a visible directory means Nickel finds
-        // the finished archive after the panel session ends. Every other app
-        // remains confined to its private Cobalt data directory.
-        PathBuf::from("/mnt/onboard/Audiobooks")
-    } else {
-        Path::new(DATA_ROOT).join(&name)
-    };
+    // Every application is confined to its own private Cobalt data directory.
+    let shelf_root = Path::new(DATA_ROOT).join(&name);
     apps.push(Hosted {
         id,
         // Named explicitly, and only here. A shell on this device is root on a
@@ -2722,15 +2729,26 @@ enum Tap {
 }
 
 /// Whether this is the SDK's text keyboard composite.
+fn is_keyboard_screen(screen: &Screen) -> bool {
+    keyboard_keys(screen).is_some()
+}
+
+/// The key faces of the SDK's text keyboard composite, if this is one.
 ///
 /// A keyboard is intentionally built from ordinary grids, so it carries no
 /// protocol-only widget tag. Its four-row shape and the three invariant
 /// utility labels distinguish it from calculators, games and choice grids.
-fn is_keyboard_screen(screen: &Screen) -> bool {
-    is_keyboard_nodes(&screen.nodes)
+///
+/// The faces come back rather than a yes or no because what the panel has to
+/// tell apart is not "is there a keyboard" but "are these the same keys".
+/// Typing leaves every face alone and moves only the field above them. Shift
+/// and the symbol layer replace all of them at once, and the two cases want
+/// opposite waveforms.
+fn keyboard_keys(screen: &Screen) -> Option<Vec<&str>> {
+    keyboard_keys_in(&screen.nodes)
 }
 
-fn is_keyboard_nodes(nodes: &[Node]) -> bool {
+fn keyboard_keys_in(nodes: &[Node]) -> Option<Vec<&str>> {
     let grids = nodes
         .iter()
         .filter_map(|node| match node {
@@ -2740,9 +2758,9 @@ fn is_keyboard_nodes(nodes: &[Node]) -> bool {
         .collect::<Vec<_>>();
     if grids.len() != 4 || grids[0].0 != 10 || grids[1].0 != 9 || grids[2].0 != 9 || grids[3].0 != 3
     {
-        return false;
+        return None;
     }
-    grids[2]
+    let shaped = grids[2]
         .1
         .first()
         .is_some_and(|cell| cell.label.eq_ignore_ascii_case("shift"))
@@ -2757,7 +2775,44 @@ fn is_keyboard_nodes(nodes: &[Node]) -> bool {
         && grids[3]
             .1
             .get(1)
-            .is_some_and(|cell| cell.label.eq_ignore_ascii_case("space"))
+            .is_some_and(|cell| cell.label.eq_ignore_ascii_case("space"));
+    shaped.then(|| {
+        grids
+            .iter()
+            .flat_map(|(_, cells)| cells.iter().map(|cell| cell.label.as_str()))
+            .collect()
+    })
+}
+
+/// What a new screen means for a keyboard already on the panel.
+///
+/// This is the distinction the panel was missing. Every keyboard-to-keyboard
+/// frame used to be painted with the fast two-level waveform, which is right
+/// for a letter appearing in the field and wrong for a layer switch: DU cannot
+/// drive an antialiased glyph out of a cell, so `?123` left the letters legible
+/// underneath the digits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardChange {
+    /// No keyboard on either side, or one is being opened.
+    Other,
+    /// The same keyboard with the same faces, so only the typed text can have
+    /// moved: one small rectangle, and the cheapest waveform there is.
+    Typed,
+    /// The same keyboard with different faces. Shift and the symbol layer both
+    /// replace every label at once.
+    Relabelled,
+    /// A keyboard is leaving the panel, and with it the last frame that may
+    /// have been painted two-level.
+    Closed,
+}
+
+fn keyboard_change(previous: Option<&Screen>, next: &Screen) -> KeyboardChange {
+    match (previous.and_then(keyboard_keys), keyboard_keys(next)) {
+        (Some(before), Some(after)) if before == after => KeyboardChange::Typed,
+        (Some(_), Some(_)) => KeyboardChange::Relabelled,
+        (Some(_), None) => KeyboardChange::Closed,
+        (None, _) => KeyboardChange::Other,
+    }
 }
 
 /// Routes one tap. Reports what the runtime has to do about it.
@@ -2839,9 +2894,80 @@ fn describe_outcome(outcome: &TaskOutcome) -> String {
 ///
 /// So the waveform is chosen from the pixels themselves rather than from how
 /// important the caller believes the frame to be.
+///
+/// # Why only the changed rectangle is written
+///
+/// The controller is asked to refresh the box enclosing the pixels that moved,
+/// and that box is all it reads. Handing it a whole freshly converted panel as
+/// well cost six megabytes of `pwrite` into uncached controller memory for a
+/// keystroke that moved one glyph, and on this hardware that was the single
+/// most expensive thing a repaint did. So the framebuffer write is now exactly
+/// the rectangle the refresh covers; everything outside it already holds what
+/// the panel is showing.
 struct Painter {
     frames: FramePlanner,
 }
+
+/// How much waveform one frame is worth.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Quality {
+    /// Whatever the planner chose from the pixels themselves.
+    Planned,
+    /// Two-level, whatever the pixels contain. Correct only where the change
+    /// is a line of text being typed: a keystroke that waits for sixteen
+    /// levels does not read as a keystroke, and the residue two-level updates
+    /// leave behind is cleared by [`Quality::Clearing`] before the reader can
+    /// accumulate any of it.
+    Fast,
+    /// Sixteen levels in full mode, which drives every pixel of the region
+    /// rather than only the ones that moved and so takes the previous content
+    /// with it. This is the only paint that clears residue from a region.
+    Clearing,
+}
+
+/// What one frame cost and how it reached the panel.
+#[derive(Clone, Copy)]
+struct Painted {
+    region: Rect,
+    waveform: &'static str,
+    full: bool,
+    /// Planning the frame and converting the changed rectangle to pixels.
+    prepare: Duration,
+    /// Waiting out the previous frame's update, which is how long the panel
+    /// was still showing that one after the runtime had finished with it.
+    wait: Duration,
+    /// Writing this frame's bytes and submitting its update.
+    write: Duration,
+}
+
+impl Painted {
+    fn total(&self) -> Duration {
+        self.prepare
+            .saturating_add(self.wait)
+            .saturating_add(self.write)
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "waveform {} {} {}x{} at {},{}; {} ms preparing, {} ms waiting for the previous frame, \
+             {} ms writing",
+            self.waveform,
+            if self.full { "full" } else { "partial" },
+            self.region.width,
+            self.region.height,
+            self.region.x,
+            self.region.y,
+            self.prepare.as_millis(),
+            self.wait.as_millis(),
+            self.write.as_millis(),
+        )
+    }
+}
+
+/// Above this, a single frame is worth a line in the session trace. A trace
+/// line costs an `fsync`, so an ordinary frame must not buy one; a frame that
+/// took this long has already cost far more than the line will.
+const SLOW_PAINT: Duration = Duration::from_millis(250);
 
 impl Painter {
     fn new(width: usize, height: usize) -> Self {
@@ -2855,20 +2981,34 @@ impl Painter {
         display: &DisplaySession,
         whole_screen: Rect,
         surface: &Surface,
-    ) -> Result<(), String> {
-        self.paint_with(display, whole_screen, surface, false)
+    ) -> Result<Option<Painted>, String> {
+        self.paint_with(display, whole_screen, surface, Quality::Planned)
     }
 
     /// Repaints rapidly changing input without spending a sixteen-level
-    /// waveform on every character. Opening and closing the keyboard still use
-    /// the ordinary planner, which gives the panel a clean, antialiased frame.
+    /// waveform on every character.
     fn paint_fast(
         &mut self,
         display: &DisplaySession,
         whole_screen: Rect,
         surface: &Surface,
-    ) -> Result<(), String> {
-        self.paint_with(display, whole_screen, surface, true)
+    ) -> Result<Option<Painted>, String> {
+        self.paint_with(display, whole_screen, surface, Quality::Fast)
+    }
+
+    /// Replaces everything in the changed rectangle, residue included.
+    ///
+    /// Used where a region's whole content is being swapped rather than added
+    /// to: a keyboard changing layer or case, and a keyboard leaving. Those are
+    /// the moments a two-level waveform cannot be trusted to have removed what
+    /// it drew, so they are also the moments to prove it has.
+    fn paint_clearing(
+        &mut self,
+        display: &DisplaySession,
+        whole_screen: Rect,
+        surface: &Surface,
+    ) -> Result<Option<Painted>, String> {
+        self.paint_with(display, whole_screen, surface, Quality::Clearing)
     }
 
     fn paint_with(
@@ -2876,12 +3016,13 @@ impl Painter {
         display: &DisplaySession,
         whole_screen: Rect,
         surface: &Surface,
-        prefer_fast: bool,
-    ) -> Result<(), String> {
+        quality: Quality,
+    ) -> Result<Option<Painted>, String> {
+        let started = Instant::now();
         let Some(transition) = self.frames.plan(surface) else {
             // Nothing moved. Refreshing anyway costs a visible flicker and
             // some battery to show exactly the same picture.
-            return Ok(());
+            return Ok(None);
         };
         let region = Rect {
             x: u32::try_from(transition.region.x).unwrap_or(0),
@@ -2889,36 +3030,85 @@ impl Painter {
             width: u32::try_from(transition.region.width).unwrap_or(0),
             height: u32::try_from(transition.region.height).unwrap_or(0),
         };
-        let intent = match (prefer_fast, transition.waveform) {
-            (true, PanelWaveform::Du | PanelWaveform::Gl16) | (false, PanelWaveform::Du) => {
-                RefreshIntent::FastFeedback
-            }
-            (false, PanelWaveform::Gl16) => RefreshIntent::TextContent,
-            (_, PanelWaveform::Gc16) => RefreshIntent::QualityContent,
+        let (intent, full) = match quality {
+            Quality::Clearing => (RefreshIntent::QualityContent, true),
+            Quality::Fast => match transition.waveform {
+                // A frame the planner already wants to clean is not made
+                // cheaper by being asked for twice.
+                PanelWaveform::Gc16 => (RefreshIntent::QualityContent, transition.full),
+                PanelWaveform::Du | PanelWaveform::Gl16 => (RefreshIntent::FastFeedback, false),
+            },
+            Quality::Planned => (
+                match transition.waveform {
+                    PanelWaveform::Du => RefreshIntent::FastFeedback,
+                    PanelWaveform::Gl16 => RefreshIntent::TextContent,
+                    PanelWaveform::Gc16 => RefreshIntent::QualityContent,
+                },
+                transition.full,
+            ),
         };
-
-        let frame =
-            RegionSnapshot::from_grayscale(display.geometry(), whole_screen, &surface.pixels)
-                .map_err(|error| format!("prepare the frame: {error}"))?;
-        display
-            .restore(&frame)
-            .map_err(|error| format!("write the frame: {error}"))?;
+        // Built before the pixels, so that the rectangle written and the
+        // rectangle refreshed are the one clipped rectangle rather than two
+        // that have to be trusted to agree.
         let plan = RefreshPlan::new(
             region,
             intent,
-            transition.full,
+            full,
             whole_screen.width,
             whole_screen.height,
         )
         .ok_or_else(|| "the refresh region is not inside the screen".to_owned())?;
+        let source_width = u32::try_from(surface.width)
+            .map_err(|_| "the rendered panel is too wide to write".to_owned())?;
+        let source_height = u32::try_from(surface.height)
+            .map_err(|_| "the rendered panel is too tall to write".to_owned())?;
+        let frame = RegionSnapshot::from_grayscale_window(
+            display.geometry(),
+            plan.region,
+            source_width,
+            source_height,
+            &surface.pixels,
+        )
+        .map_err(|error| format!("prepare the frame: {error}"))?;
+        let prepare = started.elapsed();
+
+        // The previous frame's update. Waited out here rather than left to
+        // `restore` so that the trace can say how much of a slow frame was the
+        // panel and how much was the runtime; either way the bytes the
+        // controller is reading are not touched until it has finished.
+        let waited = Instant::now();
         display
-            .refresh(plan)
+            .settle()
+            .map_err(|error| format!("wait for the previous frame: {error}"))?;
+        let wait = waited.elapsed();
+
+        let written = Instant::now();
+        display
+            .restore(&frame)
+            .map_err(|error| format!("write the frame: {error}"))?;
+        // Not waited on: the runtime's next move is to render the frame after
+        // this one, and the controller can be driving the panel while it does.
+        // Any write that would disturb these bytes waits first.
+        display
+            .refresh_deferred(plan)
             .map_err(|error| format!("show the frame: {error}"))?;
+        let write = written.elapsed();
 
         if !self.frames.commit(surface, transition) {
             return Err("the frame planner rejected a completed refresh".to_owned());
         }
-        Ok(())
+        Ok(Some(Painted {
+            region: plan.region,
+            waveform: match intent {
+                RefreshIntent::FastFeedback => "DU",
+                RefreshIntent::TextContent => "GL16",
+                RefreshIntent::QualityContent => "GC16",
+            },
+            full: plan.full,
+            prepare,
+            wait,
+            write,
+        }))
     }
 }
 
@@ -3030,19 +3220,77 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_the_sdk_keyboard_shape_gets_fast_input_updates() {
-        let keyboard = vec![
-            grid(1, 10, &["q"; 10]),
-            grid(2, 9, &["a"; 9]),
-            grid(3, 9, &["shift", "z", "x", "c", "v", "b", "n", "m", "back"]),
-            grid(4, 3, &["?123", "space", "Search"]),
-        ];
-        assert!(super::is_keyboard_nodes(&keyboard));
+    /// A keyboard exactly as the SDK draws it, after `presses` have been made.
+    ///
+    /// Built through the real composite rather than an imitation of it: the
+    /// runtime recognises a keyboard by its shape, so a test that invents the
+    /// shape proves only that the test and the runtime agree with each other.
+    fn sdk_keyboard(presses: &[&str]) -> Screen {
+        let mut keyboard = kobo_sdk::keyboard::Keyboard::new();
+        for press in presses {
+            keyboard.press(kobo_sdk::action_id(press));
+        }
+        kobo_sdk::ScreenBuilder::new("compose")
+            .heading("Search the libraries")
+            .typed(&keyboard, "Type here")
+            .divider()
+            .keyboard(&keyboard, "Search")
+            .button("cancel", "Cancel")
+            .build()
+    }
 
-        let mut ordinary_grid = keyboard;
-        ordinary_grid[3] = grid(4, 3, &["Clear", "0", "Equals"]);
-        assert!(!super::is_keyboard_nodes(&ordinary_grid));
+    #[test]
+    fn only_the_sdk_keyboard_shape_is_recognised_as_one() {
+        let keyboard = sdk_keyboard(&[]);
+        let faces = super::keyboard_keys(&keyboard).expect("the SDK composite is a keyboard");
+        assert_eq!(faces.len(), 10 + 9 + 9 + 3);
+
+        let mut calculator = keyboard.nodes.clone();
+        let last = calculator.len() - 1;
+        calculator[last] = grid(4, 3, &["Clear", "0", "Equals"]);
+        assert!(
+            super::keyboard_keys_in(&calculator).is_none(),
+            "a grid of the same shape that is not a keyboard was taken for one"
+        );
+    }
+
+    /// The reason a layer switch used to leave the letters showing under the
+    /// digits: every keyboard-to-keyboard frame took the two-level waveform,
+    /// which cannot drive an antialiased glyph out of a cell. Typing and
+    /// relabelling are the same shape of screen and need opposite waveforms, so
+    /// the faces themselves are what decides.
+    #[test]
+    fn a_layer_or_case_switch_is_told_apart_from_a_keystroke() {
+        let typed = sdk_keyboard(&["kb.r0c0"]);
+        let more = sdk_keyboard(&["kb.r0c0", "kb.r0c1"]);
+        let switched = sdk_keyboard(&["kb.r0c0", "kb.r0c1", "kb.layer"]);
+        let shifted = sdk_keyboard(&["kb.r0c0", "kb.r0c1", "kb.shift"]);
+        let results = Screen::new(5, vec![grid(1, 3, &["one", "two", "three"])]);
+
+        assert_eq!(
+            super::keyboard_change(Some(&typed), &more),
+            super::KeyboardChange::Typed
+        );
+        assert_eq!(
+            super::keyboard_change(Some(&more), &switched),
+            super::KeyboardChange::Relabelled
+        );
+        assert_eq!(
+            super::keyboard_change(Some(&more), &shifted),
+            super::KeyboardChange::Relabelled
+        );
+        assert_eq!(
+            super::keyboard_change(Some(&more), &results),
+            super::KeyboardChange::Closed
+        );
+        assert_eq!(
+            super::keyboard_change(Some(&results), &typed),
+            super::KeyboardChange::Other
+        );
+        assert_eq!(
+            super::keyboard_change(None, &typed),
+            super::KeyboardChange::Other
+        );
     }
 
     #[test]
@@ -3485,10 +3733,10 @@ mod hosting_tests {
 
     #[test]
     fn an_application_still_working_is_passed_over_for_a_newer_idle_one() {
-        // The shape this exists for: an audiobook was started, took minutes to
-        // write, and the owner read the news while it did. It is the oldest by
-        // a long way and the only one with anything to lose, so the idle
-        // application touched moments ago goes instead.
+        // The shape this exists for: a download was started, took minutes to
+        // finish, and the owner read something else while it did. It is the
+        // oldest by a long way and the only one with anything to lose, so the
+        // idle application touched moments ago goes instead.
         let seen = [(1, ago(600), BUSY), (2, ago(20), IDLE), (3, ago(2), IDLE)];
         assert_eq!(coldest(&seen, 3), Some(1));
     }
@@ -3517,14 +3765,14 @@ mod hosting_tests {
         };
         assert!(super::system_request_allowed("settings", &platform));
         assert!(!super::system_request_allowed("store", &platform));
-        assert!(!super::system_request_allowed("todo", &platform));
+        assert!(!super::system_request_allowed("pret-numerique", &platform));
 
         let install = DeviceRequest::InstallApp {
             id: "word-count".to_owned(),
         };
         assert!(super::system_request_allowed("store", &install));
         assert!(!super::system_request_allowed("settings", &install));
-        assert!(!super::system_request_allowed("todo", &install));
+        assert!(!super::system_request_allowed("pret-numerique", &install));
 
         assert!(super::system_request_allowed(
             "launcher",

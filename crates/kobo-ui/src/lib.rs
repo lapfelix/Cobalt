@@ -8684,24 +8684,59 @@ impl Surface {
         self.pixels.fill(value);
     }
 
-    pub fn fill_rect(&mut self, rect: Rect, value: u8) {
-        let bounds = Rect {
+    /// The surface's own extent, which is what every rect is clipped against.
+    fn bounds(&self) -> Rect {
+        Rect {
             x: 0,
             y: 0,
             width: i32::try_from(self.width).unwrap_or(i32::MAX),
             height: i32::try_from(self.height).unwrap_or(i32::MAX),
+        }
+    }
+
+    /// Hands `body` each row of `rect` that lies on the surface, as one
+    /// contiguous slice.
+    ///
+    /// Every filling and inverting primitive goes through this. Clipping once
+    /// and then handing back whole rows is what lets them be a `fill` or a walk
+    /// over a slice instead of a fallible conversion, a saturating add and a
+    /// bounds-checked index per pixel. The rect has already been clipped by the
+    /// time a row is handed over, so those checks were provably dead, and a
+    /// frame begins by filling the whole panel: one and a half million of them,
+    /// before anything has been drawn.
+    fn each_row(&mut self, rect: Rect, mut body: impl FnMut(&mut [u8])) {
+        let Some(clipped) = rect.intersection(self.bounds()) else {
+            return;
         };
-        if let Some(clipped) = rect.intersection(bounds) {
-            for y in clipped.y..clipped.y + clipped.height {
-                let row = usize::try_from(y).unwrap_or(0).saturating_mul(self.width);
-                for x in clipped.x..clipped.x + clipped.width {
-                    let index = row.saturating_add(usize::try_from(x).unwrap_or(0));
-                    if let Some(pixel) = self.pixels.get_mut(index) {
-                        *pixel = value;
-                    }
-                }
+        let (Ok(left), Ok(top), Ok(width), Ok(height)) = (
+            usize::try_from(clipped.x),
+            usize::try_from(clipped.y),
+            usize::try_from(clipped.width),
+            usize::try_from(clipped.height),
+        ) else {
+            return;
+        };
+        if width == 0 || height == 0 {
+            return;
+        }
+        let stride = self.width;
+        let start = top * stride + left;
+        let end = (top + height - 1) * stride + left + width;
+        let Some(band) = self.pixels.get_mut(start..end) else {
+            return;
+        };
+        // The band starts at the rect's left edge, so each stride-sized chunk
+        // opens on the next row's left edge and the wanted span is its first
+        // `width` bytes. The final chunk is exactly that long.
+        for row in band.chunks_mut(stride) {
+            if let Some(span) = row.get_mut(..width) {
+                body(span);
             }
         }
+    }
+
+    pub fn fill_rect(&mut self, rect: Rect, value: u8) {
+        self.each_row(rect, |row| row.fill(value));
     }
 
     /// Turns every pixel in `rect` to its opposite tone.
@@ -8712,23 +8747,11 @@ impl Surface {
     /// being done again. [`Surface::invert_press`] is what a touched control
     /// uses; this is the square, full-bleed form.
     pub fn invert_rect(&mut self, rect: Rect) {
-        let bounds = Rect {
-            x: 0,
-            y: 0,
-            width: i32::try_from(self.width).unwrap_or(i32::MAX),
-            height: i32::try_from(self.height).unwrap_or(i32::MAX),
-        };
-        if let Some(clipped) = rect.intersection(bounds) {
-            for y in clipped.y..clipped.y + clipped.height {
-                let row = usize::try_from(y).unwrap_or(0).saturating_mul(self.width);
-                for x in clipped.x..clipped.x + clipped.width {
-                    let index = row.saturating_add(usize::try_from(x).unwrap_or(0));
-                    if let Some(pixel) = self.pixels.get_mut(index) {
-                        *pixel = u8::MAX - *pixel;
-                    }
-                }
+        self.each_row(rect, |row| {
+            for pixel in row {
+                *pixel = u8::MAX - *pixel;
             }
-        }
+        });
     }
 
     /// Turns every pixel inside a rounded `rect` to its opposite tone.
@@ -8738,33 +8761,32 @@ impl Surface {
     /// is drawn by inverting a finished surface rather than by laying the
     /// control out twice.
     pub fn invert_rounded(&mut self, rect: Rect, radius: i32) {
-        let bounds = Rect {
-            x: 0,
-            y: 0,
-            width: i32::try_from(self.width).unwrap_or(i32::MAX),
-            height: i32::try_from(self.height).unwrap_or(i32::MAX),
-        };
         let radius = radius.clamp(0, min(rect.width, rect.height) / 2);
-        for row in 0..rect.height {
+        // Only the rows that land on the panel are walked. The shape still comes
+        // from `rect` and `radius` alone, so this reverses exactly by being done
+        // again, but a mark hanging off an edge no longer costs a row of work per
+        // row it does not draw. Both dimensions are known non-negative here: the
+        // clamp above panics otherwise, as it always has.
+        let first = rect.y.saturating_neg().clamp(0, rect.height);
+        let last = i32::try_from(self.height)
+            .unwrap_or(i32::MAX)
+            .saturating_sub(rect.y)
+            .clamp(0, rect.height);
+        for row in first..last {
             let inset = corner_inset(radius, min(row, rect.height - 1 - row));
-            let span = Rect {
-                x: rect.x.saturating_add(inset),
-                y: rect.y.saturating_add(row),
-                width: rect.width.saturating_sub(inset * 2),
-                height: 1,
-            };
-            let Some(clipped) = span.intersection(bounds) else {
-                continue;
-            };
-            let start = usize::try_from(clipped.y)
-                .unwrap_or(0)
-                .saturating_mul(self.width);
-            for x in clipped.x..clipped.x + clipped.width {
-                let index = start.saturating_add(usize::try_from(x).unwrap_or(0));
-                if let Some(pixel) = self.pixels.get_mut(index) {
-                    *pixel = u8::MAX - *pixel;
-                }
-            }
+            self.each_row(
+                Rect {
+                    x: rect.x.saturating_add(inset),
+                    y: rect.y.saturating_add(row),
+                    width: rect.width.saturating_sub(inset * 2),
+                    height: 1,
+                },
+                |span| {
+                    for pixel in span {
+                        *pixel = u8::MAX - *pixel;
+                    }
+                },
+            );
         }
     }
 
@@ -8828,10 +8850,22 @@ impl Surface {
             return;
         };
         if let Some(pixel) = self.pixels.get_mut(index) {
-            let destination = i32::from(*pixel);
-            let ink = i32::from(value);
-            let mixed = destination + (ink - destination) * i32::from(coverage) / 255;
-            *pixel = u8::try_from(mixed.clamp(0, 255)).unwrap_or(*pixel);
+            // The two ends of the range are exact, not approximate: mixing at
+            // zero leaves the pixel and mixing at full replaces it, which the
+            // arithmetic below also says. Naming them saves the multiply and the
+            // divide on the two coverages almost every pixel arrives with -- a
+            // glyph's interior and a picture, which is drawn at full coverage
+            // throughout.
+            match coverage {
+                0 => {}
+                u8::MAX => *pixel = value,
+                _ => {
+                    let destination = i32::from(*pixel);
+                    let ink = i32::from(value);
+                    let mixed = destination + (ink - destination) * i32::from(coverage) / 255;
+                    *pixel = u8::try_from(mixed.clamp(0, 255)).unwrap_or(*pixel);
+                }
+            }
         }
     }
 
@@ -9037,23 +9071,53 @@ impl FramePlanner {
     /// at the top and a key at the bottom, so the box between them is most of
     /// the panel while the pixels that moved are a rounding error. Charging the
     /// box would put typing back where it started.
+    ///
+    /// Walked a row at a time rather than a pixel at a time. Comparing two rows
+    /// whole lets an unchanged row be dismissed by one `memcmp`, which is nearly
+    /// every row of nearly every frame: a keystroke leaves a thousand of them
+    /// untouched. It also makes the row number the loop counter rather than
+    /// something divided out of a flat index, and the reader has no hardware
+    /// integer divide -- a page turn changes the whole panel, so the pixel-at-a-
+    /// time form paid a software division and remainder one and a half million
+    /// times to recover coordinates the loop already knew.
     fn changed(&self, surface: &Surface) -> Option<(Rect, u64)> {
+        if self.width == 0 {
+            return None;
+        }
         let (mut left, mut right) = (usize::MAX, 0usize);
         let (mut top, mut bottom) = (usize::MAX, 0usize);
         let mut flipped = 0_u64;
-        for (index, _) in surface
+        for (y, (current, previous)) in surface
             .pixels
-            .iter()
-            .zip(self.previous.iter())
+            .chunks(self.width)
+            .zip(self.previous.chunks(self.width))
             .enumerate()
-            .filter(|(_, (current, previous))| current != previous)
         {
-            let (x, y) = (index % self.width, index / self.width);
-            left = left.min(x);
-            right = right.max(x);
+            if current == previous {
+                continue;
+            }
+            let Some(first) = current
+                .iter()
+                .zip(previous.iter())
+                .position(|(current, previous)| current != previous)
+            else {
+                continue;
+            };
+            let last = current
+                .iter()
+                .zip(previous.iter())
+                .rposition(|(current, previous)| current != previous)
+                .unwrap_or(first);
+            let count = current[first..=last]
+                .iter()
+                .zip(&previous[first..=last])
+                .filter(|(current, previous)| current != previous)
+                .count();
+            left = left.min(first);
+            right = right.max(last);
             top = top.min(y);
             bottom = bottom.max(y);
-            flipped = flipped.saturating_add(1);
+            flipped = flipped.saturating_add(count as u64);
         }
         (left <= right).then(|| {
             (
@@ -10162,7 +10226,14 @@ pub fn render(screen: &Screen, surface: &mut Surface, dirty: Option<Rect>) {
 /// Averaging rather than sampling matters here: dropping pixels from a
 /// halftoned image produces moire, which on a sixteen-grey panel looks like
 /// damage. An application that fitted the picture before handing it over lands
-/// in the exact-size path and pays nothing.
+/// in the exact-size path, which is a row copy and no arithmetic at all.
+///
+/// That path used to be a claim rather than a branch. There was no exact-size
+/// case: a plate already the right size still went round the general loop and
+/// paid four integer divisions and a one-sample average for every pixel of
+/// itself. `kobo-bookview` fits every plate before handing it over, so that was
+/// the *common* case, and a full-page illustration is most of a million pixels
+/// on a processor with no hardware integer divide.
 fn draw_picture(surface: &mut Surface, rect: Rect, pixels: PicturePixels<'_>, clip: Rect) {
     let Some(visible) = rect.intersection(clip) else {
         return;
@@ -10177,25 +10248,60 @@ fn draw_picture(surface: &mut Surface, rect: Rect, pixels: PicturePixels<'_>, cl
     }
     let target_width = rect.width as usize;
     let target_height = rect.height as usize;
+    // Coverage 255 replaces the pixel outright, and averaging one sample is
+    // that sample, so at exact size every target row is a copy of a source row.
+    if source_width == target_width && source_height == target_height {
+        let Some(onscreen) = visible.intersection(surface.bounds()) else {
+            return;
+        };
+        let stride = surface.width;
+        for y in onscreen.y..onscreen.y + onscreen.height {
+            let row = (y - rect.y) as usize;
+            let column = (onscreen.x - rect.x) as usize;
+            let span = onscreen.width as usize;
+            let from = row * source_width + column;
+            let to = usize::try_from(y).unwrap_or(0) * stride + onscreen.x as usize;
+            let (Some(source), Some(target)) = (
+                pixels.grey.get(from..from + span),
+                surface.pixels.get_mut(to..to + span),
+            ) else {
+                continue;
+            };
+            target.copy_from_slice(source);
+        }
+        return;
+    }
+    // The source span of a column depends on the column alone, so it is worked
+    // out once for the picture rather than once for every pixel of it.
+    let columns: Vec<(usize, usize)> = (0..visible.width)
+        .map(|offset| {
+            let column = (visible.x - rect.x) as usize + offset as usize;
+            let from = column * source_width / target_width;
+            let to = max(from + 1, (column + 1) * source_width / target_width).min(source_width);
+            (from, to)
+        })
+        .collect();
     for y in visible.y..visible.y + visible.height {
         let row = (y - rect.y) as usize;
         let from_y = row * source_height / target_height;
-        let to_y = max(from_y + 1, (row + 1) * source_height / target_height);
-        for x in visible.x..visible.x + visible.width {
-            let column = (x - rect.x) as usize;
-            let from_x = column * source_width / target_width;
-            let to_x = max(from_x + 1, (column + 1) * source_width / target_width);
+        let to_y = max(from_y + 1, (row + 1) * source_height / target_height).min(source_height);
+        for (offset, &(from_x, to_x)) in columns.iter().enumerate() {
             let mut total = 0u32;
             let mut counted = 0u32;
-            for sample_y in from_y..to_y.min(source_height) {
+            for sample_y in from_y..to_y {
                 let base = sample_y * source_width;
-                for sample_x in from_x..to_x.min(source_width) {
+                for sample_x in from_x..to_x {
                     total += u32::from(pixels.grey[base + sample_x]);
                     counted += 1;
                 }
             }
             if let Some(mean) = total.checked_div(counted) {
-                surface.blend(x, y, u8::try_from(mean).unwrap_or(u8::MAX), 255);
+                surface.blend(
+                    visible.x + i32::try_from(offset).unwrap_or(i32::MAX),
+                    y,
+                    u8::try_from(mean).unwrap_or(u8::MAX),
+                    255,
+                );
             }
         }
     }
@@ -11939,8 +12045,15 @@ fn draw_text(
 /// a visible gap, which is a fair price for a clock that does not twitch and a
 /// bad one for a chapter number in a title.
 fn digit_cell(size: FontSize, face: Face) -> i32 {
-    ('0'..='9')
-        .map(|digit| measure_text_in(&digit.to_string(), size, face).0)
+    // The ten digits are measured one character at a time out of a stack buffer.
+    // A `to_string` each was ten heap allocations to weigh ten glyphs, paid
+    // twice for every figure the panel draws and again for every ranked row.
+    ("0123456789")
+        .chars()
+        .map(|digit| {
+            let mut buffer = [0_u8; 4];
+            measure_text_in(digit.encode_utf8(&mut buffer), size, face).0
+        })
         .max()
         .unwrap_or(0)
 }
@@ -11953,7 +12066,8 @@ fn figures_width(text: &str, size: FontSize, face: Face) -> i32 {
         let advance = if character.is_ascii_digit() {
             cell
         } else {
-            measure_text_in(&character.to_string(), size, face).0
+            let mut buffer = [0_u8; 4];
+            measure_text_in(character.encode_utf8(&mut buffer), size, face).0
         };
         width.saturating_add(advance)
     })
@@ -13157,6 +13271,59 @@ mod tests {
         frame.pixels[0] = tone::INK;
         let grey_outside_change = planner.plan(&frame).expect("black pixel changed");
         assert_eq!(grey_outside_change.waveform, PanelWaveform::Du);
+    }
+
+    /// The diff skips rows that compare equal, which is the whole reason it is
+    /// cheap. That optimisation is only allowed to be faster, never to report a
+    /// different rectangle or a different pixel count, so it is checked against
+    /// the obvious implementation on scattered changes.
+    #[test]
+    fn the_row_wise_diff_reports_what_a_pixel_walk_would() {
+        let (width, height) = (37, 23);
+        let mut planner = FramePlanner::new(width, height);
+        let mut frame = Surface::new(width, height);
+        let first = planner.plan(&frame).expect("first frame");
+        assert!(planner.commit(&frame, first));
+
+        // A spread of shapes: one pixel, a horizontal run, a vertical run, a
+        // block, and the corners.
+        for changes in [
+            vec![(5_usize, 7_usize)],
+            (0..width).map(|x| (x, 11)).collect(),
+            (0..height).map(|y| (19, y)).collect(),
+            (3..9).flat_map(|y| (12..20).map(move |x| (x, y))).collect(),
+            vec![(0, 0), (width - 1, height - 1)],
+        ] {
+            let previous = frame.pixels.clone();
+            for (x, y) in &changes {
+                frame.pixels[y * width + x] = tone::INK;
+            }
+            let mut expected = (usize::MAX, 0, usize::MAX, 0, 0_u64);
+            for (index, (current, before)) in frame.pixels.iter().zip(previous.iter()).enumerate() {
+                if current != before {
+                    let (x, y) = (index % width, index / width);
+                    expected.0 = expected.0.min(x);
+                    expected.1 = expected.1.max(x);
+                    expected.2 = expected.2.min(y);
+                    expected.3 = expected.3.max(y);
+                    expected.4 += 1;
+                }
+            }
+            let transition = planner.plan(&frame).expect("something changed");
+            let (region, flipped) = planner.changed(&frame).expect("something changed");
+            assert_eq!(region, transition.region);
+            assert_eq!(
+                (
+                    region.x as usize,
+                    (region.x + region.width - 1) as usize,
+                    region.y as usize,
+                    (region.y + region.height - 1) as usize,
+                    flipped,
+                ),
+                expected
+            );
+            assert!(planner.commit(&frame, transition));
+        }
     }
 
     #[test]
@@ -19016,6 +19183,528 @@ mod figure_tests {
                     figures_width(&rank.to_string(), FontSize::Caption, Face::Text) <= column,
                     "rank {rank} does not fit the column measured for {highest}"
                 );
+            }
+        }
+    }
+}
+
+/// Pins the fast pixel paths to the scalar loops they replaced.
+///
+/// Every reference function here is a verbatim copy of how `Surface`,
+/// `FramePlanner` and `draw_picture` filled, diffed and shrank pixels before
+/// those paths were rewritten to work a row at a time. The rewrites exist only
+/// to be faster, so what is worth asserting is not what they compute but that
+/// they compute exactly what the old loops did -- including at the awkward
+/// inputs: a rect starting off the left edge, one taller than the panel, an
+/// empty one, a plate whose source does not divide evenly into the space it was
+/// given.
+///
+/// Nothing in the workspace compared rendered pixels against anything, so
+/// before this a fill that lost its last column, or a diff reporting a box one
+/// row short, would have passed every test.
+#[cfg(test)]
+mod pixel_equivalence {
+    use super::*;
+
+    fn bounds(surface: &Surface) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: i32::try_from(surface.width).unwrap_or(i32::MAX),
+            height: i32::try_from(surface.height).unwrap_or(i32::MAX),
+        }
+    }
+
+    fn reference_fill_rect(surface: &mut Surface, rect: Rect, value: u8) {
+        let bounds = bounds(surface);
+        if let Some(clipped) = rect.intersection(bounds) {
+            for y in clipped.y..clipped.y + clipped.height {
+                let row = usize::try_from(y)
+                    .unwrap_or(0)
+                    .saturating_mul(surface.width);
+                for x in clipped.x..clipped.x + clipped.width {
+                    let index = row.saturating_add(usize::try_from(x).unwrap_or(0));
+                    if let Some(pixel) = surface.pixels.get_mut(index) {
+                        *pixel = value;
+                    }
+                }
+            }
+        }
+    }
+
+    fn reference_invert_rect(surface: &mut Surface, rect: Rect) {
+        let bounds = bounds(surface);
+        if let Some(clipped) = rect.intersection(bounds) {
+            for y in clipped.y..clipped.y + clipped.height {
+                let row = usize::try_from(y)
+                    .unwrap_or(0)
+                    .saturating_mul(surface.width);
+                for x in clipped.x..clipped.x + clipped.width {
+                    let index = row.saturating_add(usize::try_from(x).unwrap_or(0));
+                    if let Some(pixel) = surface.pixels.get_mut(index) {
+                        *pixel = u8::MAX - *pixel;
+                    }
+                }
+            }
+        }
+    }
+
+    fn reference_invert_rounded(surface: &mut Surface, rect: Rect, radius: i32) {
+        let bounds = bounds(surface);
+        let radius = radius.clamp(0, min(rect.width, rect.height) / 2);
+        for row in 0..rect.height {
+            let inset = corner_inset(radius, min(row, rect.height - 1 - row));
+            let span = Rect {
+                x: rect.x.saturating_add(inset),
+                y: rect.y.saturating_add(row),
+                width: rect.width.saturating_sub(inset * 2),
+                height: 1,
+            };
+            let Some(clipped) = span.intersection(bounds) else {
+                continue;
+            };
+            let start = usize::try_from(clipped.y)
+                .unwrap_or(0)
+                .saturating_mul(surface.width);
+            for x in clipped.x..clipped.x + clipped.width {
+                let index = start.saturating_add(usize::try_from(x).unwrap_or(0));
+                if let Some(pixel) = surface.pixels.get_mut(index) {
+                    *pixel = u8::MAX - *pixel;
+                }
+            }
+        }
+    }
+
+    fn reference_changed(previous: &[u8], surface: &Surface) -> Option<(Rect, u64)> {
+        let (mut left, mut right) = (usize::MAX, 0usize);
+        let (mut top, mut bottom) = (usize::MAX, 0usize);
+        let mut flipped = 0_u64;
+        for (index, _) in surface
+            .pixels
+            .iter()
+            .zip(previous.iter())
+            .enumerate()
+            .filter(|(_, (current, previous))| current != previous)
+        {
+            let (x, y) = (index % surface.width, index / surface.width);
+            left = left.min(x);
+            right = right.max(x);
+            top = top.min(y);
+            bottom = bottom.max(y);
+            flipped = flipped.saturating_add(1);
+        }
+        (left <= right).then(|| {
+            (
+                Rect {
+                    x: i32::try_from(left).unwrap_or(i32::MAX),
+                    y: i32::try_from(top).unwrap_or(i32::MAX),
+                    width: i32::try_from(right - left + 1).unwrap_or(i32::MAX),
+                    height: i32::try_from(bottom - top + 1).unwrap_or(i32::MAX),
+                },
+                flipped,
+            )
+        })
+    }
+
+    fn reference_draw_picture(
+        surface: &mut Surface,
+        rect: Rect,
+        pixels: PicturePixels<'_>,
+        clip: Rect,
+    ) {
+        let Some(visible) = rect.intersection(clip) else {
+            return;
+        };
+        let source_width = pixels.width as usize;
+        let source_height = pixels.height as usize;
+        if rect.width <= 0 || rect.height <= 0 || source_width == 0 || source_height == 0 {
+            return;
+        }
+        if pixels.grey.len() < source_width * source_height {
+            return;
+        }
+        let target_width = rect.width as usize;
+        let target_height = rect.height as usize;
+        for y in visible.y..visible.y + visible.height {
+            let row = (y - rect.y) as usize;
+            let from_y = row * source_height / target_height;
+            let to_y = max(from_y + 1, (row + 1) * source_height / target_height);
+            for x in visible.x..visible.x + visible.width {
+                let column = (x - rect.x) as usize;
+                let from_x = column * source_width / target_width;
+                let to_x = max(from_x + 1, (column + 1) * source_width / target_width);
+                let mut total = 0u32;
+                let mut counted = 0u32;
+                for sample_y in from_y..to_y.min(source_height) {
+                    let base = sample_y * source_width;
+                    for sample_x in from_x..to_x.min(source_width) {
+                        total += u32::from(pixels.grey[base + sample_x]);
+                        counted += 1;
+                    }
+                }
+                if let Some(mean) = total.checked_div(counted) {
+                    surface.blend(x, y, u8::try_from(mean).unwrap_or(u8::MAX), 255);
+                }
+            }
+        }
+    }
+
+    /// Rects chosen for the edges a row-at-a-time form has to get right, not
+    /// for being typical.
+    fn awkward_rects() -> Vec<Rect> {
+        vec![
+            Rect {
+                x: 0,
+                y: 0,
+                width: 31,
+                height: 17,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 31,
+                height: 0,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 17,
+            },
+            Rect {
+                x: 5,
+                y: 5,
+                width: 1,
+                height: 1,
+            },
+            Rect {
+                x: -7,
+                y: -3,
+                width: 20,
+                height: 12,
+            },
+            Rect {
+                x: 25,
+                y: 12,
+                width: 40,
+                height: 40,
+            },
+            Rect {
+                x: -40,
+                y: -40,
+                width: 200,
+                height: 200,
+            },
+            Rect {
+                x: 31,
+                y: 17,
+                width: 4,
+                height: 4,
+            },
+            Rect {
+                x: 30,
+                y: 16,
+                width: 4,
+                height: 4,
+            },
+            Rect {
+                x: 3,
+                y: 4,
+                width: -6,
+                height: 9,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: i32::MAX,
+                height: i32::MAX,
+            },
+        ]
+    }
+
+    fn speckled(width: usize, height: usize) -> Surface {
+        let mut surface = Surface::new(width, height);
+        for (index, pixel) in surface.pixels.iter_mut().enumerate() {
+            *pixel = u8::try_from(index * 37 % 256).unwrap_or(0);
+        }
+        surface
+    }
+
+    #[test]
+    fn fill_rect_writes_the_pixels_the_scalar_loop_wrote() {
+        for rect in awkward_rects() {
+            let mut fast = speckled(31, 17);
+            let mut slow = fast.clone();
+            fast.fill_rect(rect, tone::INK);
+            reference_fill_rect(&mut slow, rect, tone::INK);
+            assert_eq!(fast.pixels, slow.pixels, "fill_rect disagreed at {rect:?}");
+        }
+    }
+
+    #[test]
+    fn invert_rect_writes_the_pixels_the_scalar_loop_wrote() {
+        for rect in awkward_rects() {
+            let mut fast = speckled(31, 17);
+            let mut slow = fast.clone();
+            fast.invert_rect(rect);
+            reference_invert_rect(&mut slow, rect);
+            assert_eq!(
+                fast.pixels, slow.pixels,
+                "invert_rect disagreed at {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invert_rounded_writes_the_pixels_the_scalar_loop_wrote() {
+        // A negative-dimension rect is excluded because the radius clamp panics
+        // on one, in this code and in the loop it replaced alike. No caller can
+        // reach it: `invert_press` derives both dimensions with `saturating_sub`,
+        // so neither can go below zero.
+        //
+        // An enormous one is excluded because the *reference* walks a row per
+        // row of the rect, on or off the panel, and an `i32::MAX`-tall rect is
+        // two billion of them. That is the cost this rewrite removes, so the
+        // shape is still covered by the 200-tall rect over a 17-tall surface.
+        for rect in awkward_rects()
+            .into_iter()
+            .filter(|rect| rect.width >= 0 && rect.height >= 0 && rect.height <= 4096)
+        {
+            for radius in [0, 1, 3, 8, 64, -4] {
+                let mut fast = speckled(31, 17);
+                let mut slow = fast.clone();
+                fast.invert_rounded(rect, radius);
+                reference_invert_rounded(&mut slow, rect, radius);
+                assert_eq!(
+                    fast.pixels, slow.pixels,
+                    "invert_rounded disagreed at {rect:?} radius {radius}"
+                );
+            }
+        }
+    }
+
+    /// The one that matters most: the box and the count choose the waveform and
+    /// spend the cleaning budget, so a diff that is merely close changes what
+    /// the panel is asked to do.
+    #[test]
+    fn the_frame_diff_finds_the_box_and_the_count_the_scalar_loop_found() {
+        let width = 37;
+        let height = 23;
+        let before = speckled(width, height);
+        let mut planner = FramePlanner::new(width, height);
+        let first = planner.plan(&before).expect("a first frame");
+        assert!(planner.commit(&before, first));
+
+        let agrees = |name: &str, mutate: &dyn Fn(&mut Surface)| {
+            let mut after = before.clone();
+            mutate(&mut after);
+            assert_eq!(
+                planner.changed(&after),
+                reference_changed(&before.pixels, &after),
+                "the frame diff disagreed for {name}"
+            );
+        };
+
+        agrees("nothing", &|_| {});
+        agrees("one pixel in the middle", &|surface| {
+            surface.pixels[11 * 37 + 19] ^= 0xff;
+        });
+        agrees("the first pixel only", &|surface| {
+            surface.pixels[0] ^= 0xff;
+        });
+        agrees("the last pixel only", &|surface| {
+            let last = surface.pixels.len() - 1;
+            surface.pixels[last] ^= 0xff;
+        });
+        agrees("two corners, so the box spans the panel", &|surface| {
+            surface.pixels[0] ^= 0xff;
+            let last = surface.pixels.len() - 1;
+            surface.pixels[last] ^= 0xff;
+        });
+        agrees("one whole row", &|surface| {
+            for x in 0..37 {
+                surface.pixels[5 * 37 + x] ^= 0xff;
+            }
+        });
+        agrees("one whole column", &|surface| {
+            for y in 0..23 {
+                surface.pixels[y * 37 + 4] ^= 0xff;
+            }
+        });
+        agrees("a rect in the middle", &|surface| {
+            surface.fill_rect(
+                Rect {
+                    x: 6,
+                    y: 3,
+                    width: 9,
+                    height: 7,
+                },
+                tone::INK,
+            );
+        });
+        agrees("everything", &|surface| {
+            for pixel in &mut surface.pixels {
+                *pixel ^= 0xff;
+            }
+        });
+    }
+
+    /// A plate is shrunk by averaging, and the averaging is what the reader
+    /// sees: a fast path that sampled instead would put moire on the page and
+    /// nothing else here would have noticed.
+    #[test]
+    fn a_picture_is_drawn_as_the_sampling_loop_drew_it() {
+        let clip = Rect {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 48,
+        };
+        let sources = [
+            (16u32, 12u32),
+            (17, 13),
+            (1, 1),
+            (64, 48),
+            (63, 47),
+            (128, 96),
+            (129, 97),
+            (200, 3),
+            (3, 200),
+        ];
+        let targets = [
+            Rect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 48,
+            },
+            Rect {
+                x: 4,
+                y: 3,
+                width: 32,
+                height: 24,
+            },
+            Rect {
+                x: 4,
+                y: 3,
+                width: 31,
+                height: 23,
+            },
+            Rect {
+                x: -8,
+                y: -6,
+                width: 40,
+                height: 30,
+            },
+            Rect {
+                x: 50,
+                y: 40,
+                width: 40,
+                height: 30,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+        ];
+        for (source_width, source_height) in sources {
+            let grey: Vec<u8> = (0..source_width as usize * source_height as usize)
+                .map(|index| u8::try_from(index * 53 % 256).unwrap_or(0))
+                .collect();
+            let pixels = PicturePixels {
+                width: source_width,
+                height: source_height,
+                grey: &grey,
+            };
+            for rect in targets {
+                let mut fast = speckled(64, 48);
+                let mut slow = fast.clone();
+                draw_picture(&mut fast, rect, pixels, clip);
+                reference_draw_picture(&mut slow, rect, pixels, clip);
+                assert_eq!(
+                    fast.pixels, slow.pixels,
+                    "a {source_width}x{source_height} plate drawn into {rect:?} disagreed"
+                );
+            }
+        }
+    }
+
+    /// A partial clip is how a dirty-rectangle repaint reaches a plate, so the
+    /// clipped path has to average from the same source pixels the unclipped
+    /// one would have.
+    #[test]
+    fn a_clipped_picture_averages_from_the_same_source_pixels() {
+        let grey: Vec<u8> = (0..40 * 30)
+            .map(|index| u8::try_from(index * 7 % 256).unwrap_or(0))
+            .collect();
+        let pixels = PicturePixels {
+            width: 40,
+            height: 30,
+            grey: &grey,
+        };
+        let rect = Rect {
+            x: 2,
+            y: 2,
+            width: 40,
+            height: 30,
+        };
+        for clip in [
+            Rect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 48,
+            },
+            Rect {
+                x: 10,
+                y: 10,
+                width: 5,
+                height: 5,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                width: 3,
+                height: 48,
+            },
+            Rect {
+                x: 41,
+                y: 31,
+                width: 20,
+                height: 20,
+            },
+        ] {
+            let mut fast = speckled(64, 48);
+            let mut slow = fast.clone();
+            draw_picture(&mut fast, rect, pixels, clip);
+            reference_draw_picture(&mut slow, rect, pixels, clip);
+            assert_eq!(
+                fast.pixels, slow.pixels,
+                "a plate clipped to {clip:?} disagreed"
+            );
+        }
+    }
+
+    /// `blend` is the leaf of every glyph, icon and plate pixel, so its fast
+    /// exits have to be exits and not approximations.
+    #[test]
+    fn blending_is_exact_at_every_coverage() {
+        for destination in [0u8, 1, 17, 128, 200, 254, 255] {
+            for value in [0u8, 1, 17, 128, 200, 254, 255] {
+                for coverage in 0..=255u8 {
+                    let mut surface = Surface::new(1, 1);
+                    surface.pixels[0] = destination;
+                    surface.blend(0, 0, value, coverage);
+                    let expected = i32::from(destination)
+                        + (i32::from(value) - i32::from(destination)) * i32::from(coverage) / 255;
+                    assert_eq!(
+                        i32::from(surface.pixels[0]),
+                        expected.clamp(0, 255),
+                        "blending {value} at {coverage} onto {destination}"
+                    );
+                }
             }
         }
     }

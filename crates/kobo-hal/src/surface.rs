@@ -168,6 +168,17 @@ impl RegionPlacement {
             .checked_mul(self.stride)
             .and_then(|delta| self.first_row_offset.checked_add(delta))
     }
+
+    /// Whether the region's rows sit end to end in the framebuffer, so the
+    /// whole region is one range of bytes rather than one per row.
+    ///
+    /// True exactly for a full-width region on a surface with no padding, which
+    /// is what a whole-screen repaint is. That turns fourteen hundred `pwrite`
+    /// calls into one, and on this panel a framebuffer write is expensive
+    /// enough that the syscalls are worth counting.
+    fn contiguous(&self) -> bool {
+        self.row_bytes as u64 == self.stride
+    }
 }
 
 /// The exact bytes of one framebuffer region, sufficient to restore it.
@@ -237,16 +248,84 @@ impl RegionSnapshot {
         if gray.len() != expected {
             return Err(SurfaceError::RegionMismatch);
         }
-        let mut pixels = vec![0_u8; placement.total_bytes()];
-        for (index, byte) in pixels.iter_mut().enumerate() {
-            let pixel = index / SUPPORTED_BYTES_PER_PIXEL;
-            *byte = if index % SUPPORTED_BYTES_PER_PIXEL == ALPHA_BYTE_INDEX {
-                u8::MAX
-            } else {
-                gray.get(pixel).copied().unwrap_or(u8::MAX)
-            };
+        let mut pixels = vec![u8::MAX; placement.total_bytes()];
+        for (row, tones) in pixels
+            .chunks_mut(placement.row_bytes)
+            .zip(gray.chunks(region.width as usize))
+        {
+            expand_row(row, tones);
         }
         Ok(Self { placement, pixels })
+    }
+
+    /// Builds a writable region by cutting `region` out of a whole rendered
+    /// panel.
+    ///
+    /// [`Self::from_grayscale`] wants exactly the region's pixels, which means
+    /// a caller holding a full-panel render has to convert and write all of it
+    /// however little of it moved. On this hardware that is the single most
+    /// expensive thing a repaint does: six megabytes through `pwrite` into
+    /// uncached controller memory, for a rectangle that on a keystroke is one
+    /// glyph wide. This takes the rendered panel as it is and produces only the
+    /// rows and columns the controller is about to be asked to refresh.
+    ///
+    /// The result is the same constrained [`RegionSnapshot`] as every other
+    /// path, so it still cannot address a region it was not validated for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the region is invalid for `geometry`, `gray` does
+    /// not hold exactly one byte per pixel of the source panel, or the region
+    /// leaves that panel.
+    pub fn from_grayscale_window(
+        geometry: SurfaceGeometry,
+        region: Rect,
+        source_width: u32,
+        source_height: u32,
+        gray: &[u8],
+    ) -> Result<Self, SurfaceError> {
+        let placement = RegionPlacement::new(geometry, region)?;
+        let source_stride = source_width as usize;
+        let expected = source_stride.saturating_mul(source_height as usize);
+        if gray.len() != expected {
+            return Err(SurfaceError::RegionMismatch);
+        }
+        let right = region
+            .x
+            .checked_add(region.width)
+            .ok_or(SurfaceError::RegionMismatch)?;
+        let bottom = region
+            .y
+            .checked_add(region.height)
+            .ok_or(SurfaceError::RegionMismatch)?;
+        if right > source_width || bottom > source_height {
+            return Err(SurfaceError::RegionMismatch);
+        }
+        let mut pixels = vec![u8::MAX; placement.total_bytes()];
+        for (index, row) in pixels.chunks_mut(placement.row_bytes).enumerate() {
+            let start = (region.y as usize)
+                .saturating_add(index)
+                .saturating_mul(source_stride)
+                .saturating_add(region.x as usize);
+            let tones = gray
+                .get(start..start.saturating_add(region.width as usize))
+                .ok_or(SurfaceError::RegionMismatch)?;
+            expand_row(row, tones);
+        }
+        Ok(Self { placement, pixels })
+    }
+}
+
+/// Writes one row of grayscale tones into one row of panel pixels.
+///
+/// The alpha byte is left as the caller found it, so the buffer is filled with
+/// `u8::MAX` once rather than having an opaque alpha written per pixel here.
+fn expand_row(row: &mut [u8], tones: &[u8]) {
+    for (pixel, tone) in row
+        .chunks_exact_mut(SUPPORTED_BYTES_PER_PIXEL)
+        .zip(tones.iter())
+    {
+        pixel[..ALPHA_BYTE_INDEX].fill(*tone);
     }
 }
 
@@ -262,6 +341,10 @@ pub fn read_region(
 ) -> Result<RegionSnapshot, SurfaceError> {
     let placement = RegionPlacement::new(geometry, region)?;
     let mut pixels = vec![0_u8; placement.total_bytes()];
+    if placement.contiguous() {
+        framebuffer.read_exact_at(&mut pixels, placement.first_row_offset)?;
+        return Ok(RegionSnapshot { placement, pixels });
+    }
     for row in 0..placement.region.height {
         let offset = placement
             .row_offset(row)
@@ -294,6 +377,10 @@ pub fn write_region(
     let placement = RegionPlacement::new(geometry, snapshot.placement.region)?;
     if placement != snapshot.placement || snapshot.pixels.len() != placement.total_bytes() {
         return Err(SurfaceError::RegionMismatch);
+    }
+    if placement.contiguous() {
+        framebuffer.write_all_at(&snapshot.pixels, placement.first_row_offset)?;
+        return Ok(());
     }
     for row in 0..placement.region.height {
         let offset = placement
@@ -497,5 +584,128 @@ mod tests {
             snapshot.pixels(),
             [28, 29, 30, 31, 32, 33, 34, 35, 52, 53, 54, 55, 56, 57, 58, 59]
         );
+    }
+
+    #[test]
+    fn a_contiguous_region_is_recognised_only_when_the_rows_touch() {
+        let whole = RegionPlacement::new(
+            CLARA,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1072,
+                height: 1448,
+            },
+        )
+        .expect("the whole panel");
+        assert!(whole.contiguous());
+
+        let strip = RegionPlacement::new(
+            CLARA,
+            Rect {
+                x: 0,
+                y: 400,
+                width: 1071,
+                height: 40,
+            },
+        )
+        .expect("a nearly full-width strip");
+        assert!(!strip.contiguous());
+
+        let mut padded = CLARA;
+        padded.stride = 4352;
+        padded.memory_length = 6_301_696;
+        let full_width = RegionPlacement::new(
+            padded,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1072,
+                height: 1448,
+            },
+        )
+        .expect("the whole padded panel");
+        assert!(!full_width.contiguous());
+    }
+
+    /// Cutting a rectangle out of a rendered panel must land on exactly the
+    /// pixels a whole-panel conversion would have put there, because the two
+    /// are used interchangeably: the panel is written whole on the frames that
+    /// change everything, and by the rectangle on the frames that do not.
+    #[test]
+    fn a_windowed_frame_matches_the_same_rows_of_a_whole_one() {
+        let geometry = SurfaceGeometry {
+            width: 8,
+            height: 4,
+            stride: 32,
+            bits_per_pixel: 32,
+            memory_length: 128,
+        };
+        let panel: Vec<u8> = (0..32_u8).collect();
+        let whole = RegionSnapshot::from_grayscale(
+            geometry,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 4,
+            },
+            &panel,
+        )
+        .expect("whole panel");
+        // Grey in all three channels and an opaque alpha, which is the layout
+        // the panel reports and every other path here assumes.
+        assert_eq!(&whole.pixels()[..8], &[0, 0, 0, 0xff, 1, 1, 1, 0xff]);
+        let region = Rect {
+            x: 2,
+            y: 1,
+            width: 3,
+            height: 2,
+        };
+        let window = RegionSnapshot::from_grayscale_window(geometry, region, 8, 4, &panel)
+            .expect("a window of the same panel");
+        assert_eq!(window.placement().region(), region);
+        for row in 0..2_usize {
+            for column in 0..3_usize {
+                let cut = (row * 3 + column) * SUPPORTED_BYTES_PER_PIXEL;
+                let full = ((row + 1) * 8 + column + 2) * SUPPORTED_BYTES_PER_PIXEL;
+                assert_eq!(
+                    window.pixels()[cut..cut + SUPPORTED_BYTES_PER_PIXEL],
+                    whole.pixels()[full..full + SUPPORTED_BYTES_PER_PIXEL],
+                );
+            }
+        }
+        assert_eq!(
+            window.pixels()[ALPHA_BYTE_INDEX],
+            u8::MAX,
+            "a rendered frame is opaque"
+        );
+    }
+
+    #[test]
+    fn a_window_refuses_a_panel_it_does_not_fit() {
+        let geometry = SurfaceGeometry {
+            width: 8,
+            height: 4,
+            stride: 32,
+            bits_per_pixel: 32,
+            memory_length: 128,
+        };
+        let region = Rect {
+            x: 2,
+            y: 1,
+            width: 3,
+            height: 2,
+        };
+        assert!(matches!(
+            RegionSnapshot::from_grayscale_window(geometry, region, 8, 4, &[0; 31]),
+            Err(SurfaceError::RegionMismatch)
+        ));
+        // A panel smaller than the screen cannot supply the region even though
+        // the region is inside the screen.
+        assert!(matches!(
+            RegionSnapshot::from_grayscale_window(geometry, region, 4, 2, &[0; 8]),
+            Err(SurfaceError::RegionMismatch)
+        ));
     }
 }

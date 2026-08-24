@@ -21,6 +21,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -116,6 +117,18 @@ pub struct DisplaySession {
     geometry: SurfaceGeometry,
     profile: &'static DeviceProfile,
     snapshot: DeviceSnapshot,
+    /// The marker of a submitted update the controller may still be driving,
+    /// or zero when there is none.
+    ///
+    /// Waiting for completion in the same breath as submitting makes every
+    /// refresh cost the whole waveform before the caller may do anything else,
+    /// and on a keystroke the thing the caller does next is render the frame
+    /// after it: work the controller could have been doing at the same time.
+    /// So the wait is deferred to the only moment it is actually required,
+    /// which is immediately before the framebuffer bytes the controller is
+    /// reading would be overwritten. [`Self::restore`] enforces that, so no
+    /// caller can produce a torn frame by forgetting to wait.
+    pending: AtomicU32,
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +227,7 @@ impl DisplaySession {
             geometry,
             profile,
             snapshot,
+            pending: AtomicU32::new(0),
         })
     }
 
@@ -249,26 +263,83 @@ impl DisplaySession {
     /// from. The snapshot carries its own validated placement, so no other
     /// region can be addressed.
     ///
+    /// Any update still in flight is waited out first. The controller reads the
+    /// framebuffer while it drives the panel, so overwriting those bytes early
+    /// is what a torn frame is made of.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the write fails.
+    /// Returns an error when the write, or the wait before it, fails.
     pub fn restore(&self, snapshot: &RegionSnapshot) -> Result<(), DisplayError> {
+        self.settle()?;
         surface::write_region(&self.framebuffer, self.geometry, snapshot)?;
         Ok(())
     }
 
     /// Submits one hardware update for `plan` and waits for it to complete.
     ///
-    /// A fresh high-entropy marker is generated for every update. Markers are a
-    /// global namespace shared with the stock reader, so a low fixed marker
-    /// could be matched against another process's update.
-    ///
     /// # Errors
     ///
     /// Returns an error when the region is invalid or either ioctl fails.
     pub fn refresh(&self, plan: RefreshPlan) -> Result<(), DisplayError> {
+        self.submit(plan)?;
+        self.settle()
+    }
+
+    /// Submits one hardware update for `plan` and returns without waiting for
+    /// the panel to finish showing it.
+    ///
+    /// Use this for a frame the caller has more work to do after: the wait is
+    /// taken by the next [`Self::restore`] or [`Self::settle`] instead, so the
+    /// controller and the processor work at the same time rather than in turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the region is invalid or the ioctl fails.
+    pub fn refresh_deferred(&self, plan: RefreshPlan) -> Result<(), DisplayError> {
+        self.submit(plan)
+    }
+
+    /// Waits out an update left in flight by [`Self::refresh_deferred`].
+    ///
+    /// Doing nothing when there is none makes this safe to call on any path
+    /// that is about to hand the panel to somebody else.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wait ioctl fails.
+    pub fn settle(&self) -> Result<(), DisplayError> {
+        let marker = self.pending.swap(0, Ordering::AcqRel);
+        if marker == 0 {
+            return Ok(());
+        }
+        if self.profile.framebuffer_id == "mxc_epdc_fb" {
+            let mut wait = mxcfb::MxcfbUpdateMarkerData {
+                update_marker: marker,
+                collision_test: 0,
+            };
+            mxcfb::wait_for_update_complete(&self.framebuffer, &mut wait)?;
+        } else {
+            let mut wait = hwtcon::HwtconUpdateMarkerData {
+                update_marker: marker,
+                collision_test: 0,
+            };
+            hwtcon::wait_for_update_complete(&self.framebuffer, &mut wait)?;
+        }
+        Ok(())
+    }
+
+    /// Sends one update request and remembers its marker as in flight.
+    ///
+    /// A fresh high-entropy marker is generated for every update. Markers are a
+    /// global namespace shared with the stock reader, so a low fixed marker
+    /// could be matched against another process's update.
+    fn submit(&self, plan: RefreshPlan) -> Result<(), DisplayError> {
         // Validate the region against this exact surface before the kernel sees it.
         surface::RegionPlacement::new(self.geometry, plan.region)?;
+        // Only one marker is tracked, so an earlier update is waited out here
+        // rather than forgotten.
+        self.settle()?;
         let marker = unique_marker()?;
         if self.profile.framebuffer_id == "mxc_epdc_fb" {
             let mut update = mxcfb::MxcfbUpdateDataV1Ntx {
@@ -290,20 +361,11 @@ impl DisplaySession {
                 alt_buffer_data: mxcfb::MxcfbAltBufferDataNtx::default(),
             };
             mxcfb::send_update(&self.framebuffer, &mut update)?;
-            let mut wait = mxcfb::MxcfbUpdateMarkerData {
-                update_marker: marker,
-                collision_test: 0,
-            };
-            mxcfb::wait_for_update_complete(&self.framebuffer, &mut wait)?;
         } else {
             let mut update = plan.update_data(marker);
             hwtcon::send_update(&self.framebuffer, &mut update)?;
-            let mut wait = hwtcon::HwtconUpdateMarkerData {
-                update_marker: marker,
-                collision_test: 0,
-            };
-            hwtcon::wait_for_update_complete(&self.framebuffer, &mut wait)?;
         }
+        self.pending.store(marker, Ordering::Release);
         Ok(())
     }
 }
