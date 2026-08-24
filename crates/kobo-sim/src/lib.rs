@@ -2473,8 +2473,13 @@ fn pret_publication(index: usize) -> Option<String> {
         PRET_AUDIOBOOK => format!(r#"{published},"duration":33120"#),
         _ => format!(r#"{published},"number_of_pages":312"#),
     };
+    let series = match index {
+        2 => r#", "series":{"name":"Le rang Lynch","position":"1"}"#,
+        7 => r#", "series":{"name":"Le rang Lynch","position":"2"}"#,
+        _ => "",
+    };
     Some(format!(
-        r#"{{"handle":"{handle}","title":"{title}","authors":[{}],"isbn":"9780000000000","pdf_only":{},{edition},"description":"{PRET_DESCRIPTION}","sources":[{}]}}"#,
+        r#"{{"handle":"{handle}","title":"{title}","authors":[{}],"isbn":"9780000000000","pdf_only":{},{edition}{series},"description":"{PRET_DESCRIPTION}","sources":[{}]}}"#,
         authors
             .iter()
             .map(|author| format!("\"{author}\""))
@@ -2482,6 +2487,14 @@ fn pret_publication(index: usize) -> Option<String> {
             .join(","),
         index == PRET_PDF_BOOK,
         sources.join(",")
+    ))
+}
+
+fn pret_publication_with_basis(index: usize, basis: &str) -> Option<String> {
+    let publication = pret_publication(index)?;
+    Some(format!(
+        "{},\"basis\":\"{basis}\"}}",
+        publication.trim_end_matches('}')
     ))
 }
 
@@ -2566,11 +2579,18 @@ fn pret_browse_body(query: &str) -> Vec<u8> {
 }
 
 fn pret_related_body() -> Vec<u8> {
-    format!(
-        r#"{{"publications":[{}]}}"#,
-        pret_publications(&[3, 4, 5, 6, 7])
-    )
-    .into_bytes()
+    let publications = [
+        pret_publication_with_basis(7, "series"),
+        pret_publication_with_basis(3, "author"),
+        pret_publication_with_basis(4, "author"),
+        pret_publication_with_basis(5, "author"),
+        pret_publication_with_basis(6, "author"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",");
+    format!(r#"{{"publications":[{publications}]}}"#).into_bytes()
 }
 
 /// What the libraries themselves say is out and waiting.

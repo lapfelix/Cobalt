@@ -217,6 +217,12 @@ struct Source {
     available: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct SeriesInfo {
+    name: String,
+    position: Option<String>,
+}
+
 /// One book, however the reader arrived at it: a search, a discovery group, a
 /// category, an author, or another book's neighbours.
 ///
@@ -227,6 +233,7 @@ struct Source {
 struct Publication {
     handle: Option<String>,
     title: String,
+    series: Option<SeriesInfo>,
     /// Whether the only file either library offers is a PDF.
     ///
     /// The server's answer, never worked out here: a book that offers an EPUB
@@ -252,6 +259,8 @@ struct Publication {
     goodreads_ratings_count: Option<i64>,
     goodreads_reviews_count: Option<i64>,
     sources: Vec<Source>,
+    /// Why the proxy included this row on a related-books screen.
+    basis: Option<String>,
 }
 
 impl Publication {
@@ -1114,17 +1123,19 @@ impl PretNumerique {
     /// display type set across two lines of it costs a row of the list it is
     /// introducing.
     fn related_screen(&self) -> Screen {
-        let title = self
-            .detail
-            .as_ref()
-            .map_or_else(|| "This book".to_owned(), |book| book.title.clone());
         let mut screen = Self::nav(
             ScreenBuilder::new("related")
-                .top_bar(format!("Like {title}"))
+                .top_bar("Related books")
                 .top_bar_action(BACK, "Back"),
             0,
         )
-        .secondary("Same author, or the same kind of book, at either library.");
+        .secondary(
+            self.detail
+                .as_ref()
+                .and_then(|book| book.series.as_ref())
+                .map(|series| format!("More in {} first, then by author and subject.", series.name))
+                .unwrap_or_else(|| "More by this author and on the same subjects.".to_owned()),
+        );
         screen = self.note_block(screen, BannerLevel::Attention);
         if self.related.is_empty() && self.awaiting(RequestKind::Related) {
             return screen.skeleton(self.skeleton_lines()).build();
@@ -1203,7 +1214,7 @@ impl PretNumerique {
                         screen = screen.top_bar_action(DESCRIPTION, "Description");
                     }
                     if result.related_handle().is_some() {
-                        screen = screen.top_bar_action(RELATED, "Similar");
+                        screen = screen.top_bar_action(RELATED, "Explore");
                     }
                     screen
                 }),
@@ -1282,8 +1293,8 @@ impl PretNumerique {
                 None,
                 [(
                     DESCRIPTION.to_owned(),
+                    "Read full description".to_owned(),
                     compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS),
-                    String::new(),
                     Glyph::Book,
                 )],
             );
@@ -1333,12 +1344,13 @@ impl PretNumerique {
         });
         [
             ("Author", Some(author_line(&book.authors))),
-            ("Copies", Some(availability_summary(book))),
+            ("Availability", Some(availability_summary(book))),
             ("Length", length_label(book)),
             (
                 "Published",
                 book.published.as_deref().and_then(published_label),
             ),
+            ("Series", series_label(book)),
             ("Les Libraires", self.bookstore_category.clone()),
             (
                 "Format",
@@ -1350,7 +1362,7 @@ impl PretNumerique {
         ]
         .into_iter()
         .filter_map(|(label, value)| value.map(|value| (label, value)))
-        .take(self.detail_fact_rows(book.sources.len()))
+        .take(self.detail_fact_rows(book.sources.len()) + usize::from(book.series.is_some()))
         .collect()
     }
 
@@ -3970,6 +3982,17 @@ fn availability_state(publication: &Publication) -> &'static str {
 }
 
 fn publication_summary(publication: &Publication) -> String {
+    let reason = match publication.basis.as_deref() {
+        Some("series") => "In this series",
+        Some("author") => "By this author",
+        Some("subject") => "Same subject",
+        _ => "",
+    };
+    let reason = if reason.is_empty() {
+        String::new()
+    } else {
+        format!("{reason} · ")
+    };
     let goodreads = publication
         .goodreads_rating
         .map(|rating| format!(" · Goodreads {rating:.1}/5"))
@@ -3978,10 +4001,20 @@ fn publication_summary(publication: &Publication) -> String {
     // amount of type setting fixes it. The reader is told before they borrow.
     let format = if publication.pdf_only { " · PDF" } else { "" };
     format!(
-        "{} · {}{format}{goodreads}",
+        "{reason}{} · {}{format}{goodreads}",
         short_author_line(&publication.authors),
         availability_state(publication)
     )
+}
+
+fn series_label(publication: &Publication) -> Option<String> {
+    let series = publication.series.as_ref()?;
+    let position = series
+        .position
+        .as_deref()
+        .map(|position| format!(" · Book {position}"))
+        .unwrap_or_default();
+    Some(format!("{}{position}", series.name))
 }
 
 fn category_summary(category: &Category) -> String {
@@ -4500,6 +4533,40 @@ fn parse_sources(result: &Value) -> Vec<Source> {
         .unwrap_or_default()
 }
 
+fn parse_series(result: &Value) -> Option<SeriesInfo> {
+    let series = result.get("series")?;
+    let name = series
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| series.as_str())?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let position = series
+        .get("position")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|position| !position.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            series
+                .get("position")
+                .and_then(Value::as_i64)
+                .map(|position| position.to_string())
+        })
+        .or_else(|| {
+            series
+                .get("position")
+                .and_then(Value::as_f64)
+                .map(|position| position.to_string())
+        });
+    Some(SeriesInfo {
+        name: name.to_owned(),
+        position,
+    })
+}
+
 fn parse_publication(result: &Value) -> Option<Publication> {
     let title = result.get("title")?.as_str()?.to_owned();
     let authors = result
@@ -4549,6 +4616,7 @@ fn parse_publication(result: &Value) -> Option<Publication> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         title,
+        series: parse_series(result),
         authors,
         isbn: result
             .get("isbn")
@@ -4591,6 +4659,10 @@ fn parse_publication(result: &Value) -> Option<Publication> {
             .get("goodreads_reviews_count")
             .and_then(Value::as_i64),
         sources,
+        basis: result
+            .get("basis")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -5112,6 +5184,7 @@ mod tests {
             handle: Some(format!("{title}-handle")),
             pdf_only: false,
             title: title.to_owned(),
+            series: None,
             authors: vec!["Fixture author".to_owned()],
             isbn: Some("9780000000000".to_owned()),
             description: None,
@@ -5123,7 +5196,27 @@ mod tests {
             goodreads_ratings_count: None,
             goodreads_reviews_count: None,
             sources,
+            basis: None,
         }
+    }
+
+    #[test]
+    fn related_rows_keep_series_and_explain_the_match() {
+        let body = br#"{"publications":[{"title":"Le second rang","series":{"name":"Le rang Lynch","position":"2"},"basis":"series","sources":[{"handle":"h","catalog":"montreal","catalog_name":"Montreal","availability":"Available now","is_available":true}]}]}"#;
+        let book = parse_publications(body)
+            .expect("the related response is valid JSON")
+            .pop()
+            .expect("the publication is usable");
+
+        assert_eq!(
+            book.series,
+            Some(super::SeriesInfo {
+                name: "Le rang Lynch".to_owned(),
+                position: Some("2".to_owned())
+            })
+        );
+        assert_eq!(book.basis.as_deref(), Some("series"));
+        assert!(publication_summary(&book).starts_with("In this series"));
     }
 
     /// The same book with everything the server can say about it, and a blurb
@@ -6721,7 +6814,7 @@ mod tests {
         let quiet_drawn = format!("{:?}", quiet.detail_screen());
         assert!(quiet_drawn.contains("desert world Arrakis"));
         assert!(quiet_drawn.contains("More by this author"));
-        assert!(quiet_drawn.contains("Similar"));
+        assert!(quiet_drawn.contains("Explore"));
 
         for (name, metrics) in CONTENT_PANELS {
             // The runtime tells the app which panel it is drawing to, and how
@@ -7358,7 +7451,7 @@ mod tests {
             ..PretNumerique::default()
         });
         app.start();
-        assert!(format!("{:?}", app.app().detail_screen()).contains("Similar"));
+        assert!(format!("{:?}", app.app().detail_screen()).contains("Explore"));
         let commands = app.action(action_id(RELATED));
         assert_eq!(app.app().view, View::Related);
         let url = fetched(commands).expect("neighbours are asked for");
@@ -7376,7 +7469,7 @@ mod tests {
             ..PretNumerique::default()
         };
         let drawn = format!("{:?}", app.related_screen());
-        assert!(drawn.contains("Like Fixture title"));
+        assert!(drawn.contains("Related books"));
         assert!(drawn.contains("Page 1 of 2"));
         assert!(drawn.contains(&format!("Neighbour {}", related_rows() - 1)));
         assert!(!drawn.contains(&format!("Neighbour {}", related_rows())));
