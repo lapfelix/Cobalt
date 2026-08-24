@@ -34,6 +34,7 @@
 
 use crate::blackbox::{self, trace};
 use kobo_hal::display::{DisplaySession, OWNER_UNLOCK_PHRASE};
+use kobo_hal::gpio::{self, GpioEvent, GpioSession};
 use kobo_hal::input::TouchSession;
 use kobo_hal::reader::{Reader, Watchdog, WATCHDOG_CHECK};
 use kobo_hal::soc_watchdog::SocWatchdog;
@@ -41,7 +42,6 @@ use kobo_hal::supervisor::Suspended;
 use kobo_hal::touch::TouchEvent;
 use kobo_hal::{Rect, RefreshIntent, RefreshPlan, RegionSnapshot};
 use kobo_policy::{Backends, Capability, Declared, DeviceServices, PowerPolicy, TaskRunner};
-use kobo_profile::DeviceProfile;
 use kobo_protocol::{Frame, Lifecycle, Message, TaskError, TaskOutcome};
 use kobo_ui::{
     render_all, ActionId, Chrome, FontHandle, FramePlanner, Node, PanelWaveform, PictureCache,
@@ -71,6 +71,19 @@ const SECRETS: &str = "/mnt/onboard/.adds/cobalt/secrets";
 /// the owner's own network exactly as it verifies a public host.
 const TRUST: &str = "/mnt/onboard/.adds/cobalt/trust";
 const DICTIONARIES: &str = "/mnt/onboard/.adds/cobalt/dictionaries";
+
+/// Turns on the per-frame timing line on stderr.
+const FRAME_TIMING: &str = "KOBO_FRAME_TIMING";
+
+/// Whether the owner asked for per-frame timing, read once for the process.
+///
+/// Once rather than per frame because the point of the line is to measure the
+/// paint path, and an environment lookup inside the thing being measured is
+/// exactly the wrong place for it.
+fn frame_timing_wanted() -> bool {
+    static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WANTED.get_or_init(|| std::env::var(FRAME_TIMING).ok().as_deref() == Some("1"))
+}
 
 /// The most publisher faces one application may hold in the runtime at once.
 ///
@@ -407,6 +420,8 @@ const APP_STOP_GRACE: Duration = Duration::from_secs(3);
 /// battery life.
 enum Event {
     Touch(TouchEvent),
+    /// A button or orientation report from the `gpio-keys` node.
+    Gpio(GpioEvent),
     App(u64, Box<Frame>),
     /// An application's end of the socket closed.
     AppGone(u64),
@@ -574,7 +589,17 @@ pub fn present(application: &Path, limits: Limits) -> Result<String, String> {
         .map(|t| t.path.clone())
         .ok_or_else(|| "touch probe was unavailable".to_owned())?;
 
-    let mut touch = TouchSession::acquire(Path::new(&touch_path), profile)
+    let framebuffer = display
+        .snapshot()
+        .framebuffer
+        .as_ref()
+        .ok_or_else(|| "framebuffer probe was unavailable".to_owned())?;
+    // Resolved rather than assumed: the transform that places every tap is
+    // only correct at the orientation it was measured at, so a reader held the
+    // other way up has to refuse the session rather than mislocate touches.
+    let pose = kobo_profile::PanelPose::resolve(profile, framebuffer)
+        .map_err(|error| format!("take the touch panel: {error}"))?;
+    let mut touch = TouchSession::acquire(Path::new(&touch_path), pose)
         .map_err(|error| format!("take the touch panel: {error}"))?;
 
     // Without this the device reboots itself partway through the session, so a
@@ -607,13 +632,41 @@ pub fn present(application: &Path, limits: Limits) -> Result<String, String> {
     let taps = TouchSink::default();
     pump_touch(&mut touch, &taps);
 
+    // The buttons and the orientation channel, on hardware that has them.
+    // Absence is not a failure: not every supported device has page keys,
+    // and a session without buttons is the state every session was in
+    // before this existed.
+    let mut buttons =
+        gpio::discover_buttons_path().and_then(|path| match GpioSession::acquire(&path) {
+            Ok(session) => Some(session),
+            Err(error) => {
+                trace(&format!("buttons unavailable: {error}"));
+                None
+            }
+        });
+    if let Some(session) = buttons.as_mut() {
+        pump_gpio(session, &taps);
+    }
+
+    // Which page key means "forward" depends on how the reader is held. At
+    // the profile's reference pose (buttons on the right, on the Libra 2)
+    // key 194 pages forward and 193 pages back, read off the hardware: with
+    // the buttons on the right the upper key is 193 and goes back, the lower
+    // key is 194 and goes forward.
+    //
+    // The behaviour was checked the same way: a session paged as expected in
+    // both portrait poses, and a half turn mid-session inverted it correctly
+    // with no restart. Pose resolution has already refused anything but the
+    // two portrait poses.
+    let forward_is_194 = pose.rotation() % 4 == profile.reference_rotation % 4;
+
     let outcome = host_applications(
         application,
         &display,
         whole_screen,
         &taps,
         limits,
-        profile,
+        forward_is_194,
         &watchdog,
     );
     trace("session finished, handing the panel back");
@@ -873,7 +926,7 @@ struct Hosted {
     path: PathBuf,
     /// Root-owned filesystem visible to this application on the device.
     jail: Option<PathBuf>,
-    child: Child,
+    child: ApplicationChild,
     stream: std::os::unix::net::UnixStream,
     store: kobo_policy::store::Store,
     shelf: kobo_policy::shelf::Shelf,
@@ -899,6 +952,67 @@ struct Hosted {
     painted: u32,
     /// When this was last on the panel, for deciding what to stop first.
     used: Instant,
+}
+
+/// An application process plus the legacy-kernel supervisor, when one is
+/// needed. Ordinary process APIs may reap a child only after ptrace has
+/// released its exit stop, so that ordering lives behind this type.
+struct ApplicationChild {
+    process: Child,
+    #[cfg(all(target_os = "linux", target_arch = "arm"))]
+    trace: Option<kobo_abi::sandbox::SyscallTrace>,
+}
+
+impl ApplicationChild {
+    fn ordinary(process: Child) -> Self {
+        Self {
+            process,
+            #[cfg(all(target_os = "linux", target_arch = "arm"))]
+            trace: None,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "arm"))]
+    fn traced(process: Child, trace: kobo_abi::sandbox::SyscallTrace) -> Self {
+        Self {
+            process,
+            trace: Some(trace),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.process.id()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        #[cfg(all(target_os = "linux", target_arch = "arm"))]
+        if self
+            .trace
+            .as_ref()
+            .is_some_and(|trace| !trace.is_detached())
+        {
+            return Ok(None);
+        }
+        self.process.try_wait()
+    }
+
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        #[cfg(all(target_os = "linux", target_arch = "arm"))]
+        if let Some(trace) = &self.trace {
+            trace.wait_until_detached(APP_STOP_GRACE);
+        }
+        self.process.wait()
+    }
+
+    fn trace_failure(&self) -> Option<String> {
+        #[cfg(all(target_os = "linux", target_arch = "arm"))]
+        if let Some(trace) = &self.trace {
+            return trace.failure();
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+        let _ = self;
+        None
+    }
 }
 
 struct AppLaunch {
@@ -931,6 +1045,18 @@ impl AppLaunch {
     }
 
     fn sandboxed(path: &Path, id: u64) -> Result<Self, String> {
+        if !kobo_abi::sandbox::network_boundary_available() {
+            // Kobo's 4.1 i.MX6 kernels ship without CONFIG_SECCOMP and
+            // CONFIG_NET_NS, so neither in-kernel network boundary exists
+            // there. The chroot, the privilege ceiling and the identity drop
+            // hold as everywhere, and on these kernels the runtime supervises
+            // the application's syscalls over ptrace instead. Said once per
+            // launch so a session transcript names which mechanism held.
+            trace(
+                "application network boundary enforced by ptrace supervision \
+                 on this kernel; seccomp and network namespaces are absent",
+            );
+        }
         let root = std::env::temp_dir().join(format!("kobo-app-{}-{id}", std::process::id()));
         fs::create_dir(&root)
             .map_err(|error| format!("create application sandbox {}: {error}", root.display()))?;
@@ -1002,10 +1128,13 @@ fn host_applications(
     whole_screen: Rect,
     touch: &TouchSink,
     limits: Limits,
-    profile: &'static DeviceProfile,
+    forward_is_194: bool,
     watchdog: &Arc<Watchdog>,
 ) -> Result<String, String> {
-    let _ = profile;
+    // Kept current by the orientation channel: a reader flipped mid-session
+    // keeps "forward" pointing forward even though the image does not rotate
+    // yet.
+    let mut forward_is_194 = forward_is_194;
     let catalogue = application
         .parent()
         .map_or_else(|| PathBuf::from("/tmp"), Path::to_path_buf);
@@ -1280,6 +1409,78 @@ fn host_applications(
                             &home,
                             &mut status,
                         )?;
+                    }
+                }
+                Ok(Event::Gpio(event)) => {
+                    last_activity = Instant::now();
+                    match event {
+                        // On the press, not the release: a page turn should
+                        // not wait for a finger to lift. Only the foreground
+                        // application hears it, for the same reason as taps
+                        // and the cover: the press happened in front of the
+                        // reader, and a background application has no
+                        // standing to react to it.
+                        //
+                        // A screen that declares its page turns gets the
+                        // declared action, exactly as if the side zone had
+                        // been tapped, so a book, a shelf and a catalogue all
+                        // page without knowing buttons exist. The layout is
+                        // consulted rather than the screen because an overlay
+                        // takes the page turns away, and a press while a
+                        // dialog is up must not turn the page underneath it:
+                        // the reader is answering the dialog. Only a screen
+                        // that genuinely declares nothing receives the raw
+                        // intent, as `Message::PageTurn`.
+                        GpioEvent::Button {
+                            button: button @ (gpio::Button::Page193 | gpio::Button::Page194),
+                            pressed: true,
+                        } => {
+                            let forward = (button == gpio::Button::Page194) == forward_is_194;
+                            if let Some(index) = index_of(&apps, front) {
+                                let at_home = apps[index].path == home;
+                                let message = match apps[index].screen.as_ref() {
+                                    Some(current) => {
+                                        // The chrome the frame was drawn with,
+                                        // for the same reason `action_for`
+                                        // uses it: laying out with a different
+                                        // one resolves the press against a
+                                        // screen the reader cannot see.
+                                        let chrome = chrome_for(current, at_home, &mut status);
+                                        page_key_message(current, &chrome, forward)
+                                    }
+                                    // Nothing painted yet, so there is nothing
+                                    // to resolve against and the application
+                                    // hears the raw intent.
+                                    None => Some(kobo_protocol::Message::PageTurn { forward }),
+                                };
+                                if let Some(message) = message {
+                                    apps[index].send(message)?;
+                                }
+                            }
+                        }
+                        GpioEvent::Button {
+                            button: gpio::Button::Power,
+                            pressed,
+                        } => {
+                            // Meaning arrives with the power sub-feature:
+                            // short press sleep, long press shutdown. Until
+                            // then the press is at least on the record.
+                            trace(&format!("power button pressed={pressed}"));
+                        }
+                        // The kernel's digested accelerometer verdict. Only
+                        // the two portrait poses move the key mapping; the
+                        // image itself does not rotate mid-session yet.
+                        // The pose each MSC_RAW value names was measured here
+                        // by a rotation-only capture, and then confirmed in
+                        // use: a reader turned end for end mid-session, with
+                        // no restart, goes on paging the way it is now held.
+                        GpioEvent::Orientation(gpio::Orientation::PortraitUp) => {
+                            forward_is_194 = true;
+                        }
+                        GpioEvent::Orientation(gpio::Orientation::PortraitDown) => {
+                            forward_is_194 = false;
+                        }
+                        GpioEvent::Button { .. } | GpioEvent::Orientation(_) => {}
                     }
                 }
                 Ok(Event::Touch(event)) => {
@@ -2036,6 +2237,7 @@ fn host_applications(
                         | Message::DeviceResult(_)
                         | Message::StoreResult(_)
                         | Message::CoverChanged { .. }
+                        | Message::PageTurn { .. }
                         | Message::ShellEvent(_) => {
                             return Err(format!(
                                 "{} sent a runtime-only message",
@@ -2304,6 +2506,17 @@ fn start_application(
     sender: &Sender<Event>,
 ) -> Result<u64, String> {
     let expected_name = installed_name(path)?;
+    // Capabilities are part of admission, not post-launch setup. Reading them
+    // before any process exists means a corrupt or concurrently removed
+    // manifest cannot leave an unowned child and jail behind.
+    let declared = if path.starts_with(Path::new(COBALT_ROOT).join("apps")) {
+        crate::app_store::declared(Path::new(COBALT_ROOT), &expected_name)
+            .ok_or_else(|| format!("read application manifest for {expected_name}"))?
+    } else if let Some(declared) = crate::app_store::builtin_declared(&expected_name) {
+        declared
+    } else {
+        Declared::all()
+    };
     let launch = AppLaunch::prepare(path, *next_id)?;
     let AppLaunch {
         listener,
@@ -2325,12 +2538,26 @@ fn start_application(
         // left of a crash was the application no longer being there, and the
         // one question worth asking of a crash could not be answered at all.
         .stderr(Stdio::piped());
-    if let Some(sandbox) = sandbox {
-        sandbox.configure(&mut command);
+    let trace_syscalls = if let Some(sandbox) = sandbox {
+        sandbox.configure(&mut command)
     } else {
         kobo_abi::process_group::configure(&mut command);
-    }
-    let mut child = match command.spawn() {
+        false
+    };
+    let spawned = if trace_syscalls {
+        #[cfg(all(target_os = "linux", target_arch = "arm"))]
+        {
+            kobo_abi::sandbox::SyscallTrace::spawn(command)
+                .map(|(child, trace)| ApplicationChild::traced(child, trace))
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
+        {
+            unreachable!("syscall tracing is selected only on 32-bit ARM Linux")
+        }
+    } else {
+        command.spawn().map(ApplicationChild::ordinary)
+    };
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
             let _ignored = fs::remove_file(&socket_path);
@@ -2340,7 +2567,7 @@ fn start_application(
             return Err(format!("start {}: {error}", path.display()));
         }
     };
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = child.process.stderr.take() {
         report_what_an_application_says(expected_name.clone(), stderr);
     }
     let greeting = greet(&listener, whole_screen, &expected_name);
@@ -2350,6 +2577,7 @@ fn start_application(
         Ok(greeting) => greeting,
         Err(error) => {
             stop_application(&mut child, jail.as_deref());
+            let error = with_trace_failure(error, &child);
             if let Some(root) = &jail {
                 let _ignored = fs::remove_dir_all(root);
             }
@@ -2360,6 +2588,7 @@ fn start_application(
     *next_id += 1;
     if let Err(error) = pump_application(&stream, sender, id) {
         stop_application(&mut child, jail.as_deref());
+        let error = with_trace_failure(error, &child);
         if let Some(root) = &jail {
             let _ignored = fs::remove_dir_all(root);
         }
@@ -2367,14 +2596,6 @@ fn start_application(
     }
     let waker = sender.clone();
     let credential_app = name.clone();
-    let declared = if path.starts_with(Path::new(COBALT_ROOT).join("apps")) {
-        crate::app_store::declared(Path::new(COBALT_ROOT), &name)
-            .ok_or_else(|| format!("read application manifest for {name}"))?
-    } else if let Some(declared) = crate::app_store::builtin_declared(&name) {
-        declared
-    } else {
-        Declared::all()
-    };
     let tasks = TaskRunner::simulated(std::env::temp_dir())
         .with_fetch(Arc::new(kobo_net::fetch_from))
         .with_post(Arc::new(kobo_net::post))
@@ -2460,6 +2681,13 @@ fn stop_hosted(mut app: Hosted) {
     }
     app.tasks.shutdown();
     stop_application(&mut app.child, app.jail.as_deref());
+    if let Some(failure) = app.child.trace_failure() {
+        trace(&format!(
+            "{} syscall supervisor failed: {failure}",
+            app.name
+        ));
+        println!("{} syscall supervisor failed: {failure}", app.name);
+    }
     if let Some(root) = app.jail {
         let _ignored = fs::remove_dir_all(root);
     }
@@ -2548,7 +2776,7 @@ const HOLD_TIME: Duration = Duration::from_millis(500);
 const HOLD_SLIP: i32 = 40;
 
 /// Ends the application, politely if it has already finished and firmly if not.
-fn stop_application(child: &mut Child, jail: Option<&Path>) {
+fn stop_application(child: &mut ApplicationChild, jail: Option<&Path>) {
     let group = child.id();
     let _ignored = kobo_abi::process_group::signal(group, kobo_abi::process_group::SIGTERM);
     if let Some(root) = jail {
@@ -2577,6 +2805,13 @@ fn stop_application(child: &mut Child, jail: Option<&Path>) {
     }
     if child.try_wait().ok().flatten().is_none() {
         let _ignored = child.wait();
+    }
+}
+
+fn with_trace_failure(error: String, child: &ApplicationChild) -> String {
+    match child.trace_failure() {
+        Some(failure) => format!("{error}; syscall supervisor failed: {failure}"),
+        None => error,
     }
 }
 
@@ -2618,6 +2853,38 @@ fn action_for(
     trace(&format!("touch up ({x},{y}) -> {hit:?}"));
     println!("touch up ({x},{y}) -> {hit:?}");
     hit
+}
+
+/// Resolves a page-key press to the message the application should hear.
+///
+/// The sibling of [`action_for`], and deliberately the same shape: a press and
+/// a tap on a side zone mean the same thing, so they must not disagree about
+/// what a screen currently allows.
+///
+/// `None` means the press is dropped. That is not the same as an application
+/// choosing to ignore it, which is why the three states are matched rather
+/// than collapsed: see [`kobo_ui::PagingState`].
+fn page_key_message(
+    screen: &Screen,
+    chrome: &Chrome,
+    forward: bool,
+) -> Option<kobo_protocol::Message> {
+    match screen.layout_with(&metrics_for(screen), chrome).page_turns {
+        kobo_ui::PagingState::Declared(turns) => Some(kobo_protocol::Message::Action {
+            action: if forward { turns.next } else { turns.previous },
+        }),
+        kobo_ui::PagingState::None => Some(kobo_protocol::Message::PageTurn { forward }),
+        // Dropped, but not silently: a press that does nothing is
+        // indistinguishable from a broken button, and this is the record that
+        // says which it was. Both channels, as `action_for` does it, because
+        // the black box is off unless somebody asked for it and this has to
+        // be answerable in an ordinary session.
+        kobo_ui::PagingState::SuppressedByOverlay => {
+            trace("page key dropped: an overlay is up");
+            println!("page key dropped: an overlay is up");
+            None
+        }
+    }
 }
 
 fn text_hold_for(
@@ -3165,6 +3432,18 @@ impl TouchSink {
             let _ignored = sender.send(Event::Touch(event));
         }
     }
+
+    /// Same policy as taps: between applications a press is dropped, not
+    /// queued for whatever comes up next.
+    fn send_gpio(&self, event: GpioEvent) {
+        let guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(sender) = guard.as_ref() {
+            let _ignored = sender.send(Event::Gpio(event));
+        }
+    }
 }
 
 fn pump_touch(touch: &mut TouchSession, sink: &TouchSink) {
@@ -3175,6 +3454,21 @@ fn pump_touch(touch: &mut TouchSession, sink: &TouchSink) {
     thread::spawn(move || {
         while let Ok(event) = events.recv() {
             sink.send(event);
+        }
+    });
+}
+
+/// One reader thread on the button device for the whole panel session,
+/// mirroring [`pump_touch`] for the same reason: the destination changes as
+/// applications come and go, the thread does not.
+fn pump_gpio(buttons: &mut GpioSession, sink: &TouchSink) {
+    let Some(events) = buttons.take_events() else {
+        return;
+    };
+    let sink = sink.clone();
+    thread::spawn(move || {
+        while let Ok(event) = events.recv() {
+            sink.send_gpio(event);
         }
     });
 }
@@ -3612,6 +3906,72 @@ mod tests {
         assert_eq!(
             action_for(touch, Some(&no_hold), &chrome, true),
             Some(ActionId(12))
+        );
+    }
+
+    /// The three states a page key can land in, and the one that used to be
+    /// wrong: a press while a dialog is up is dropped, not passed on raw.
+    #[test]
+    fn a_page_key_is_dropped_while_an_overlay_is_up() {
+        let chrome = Chrome::default();
+        let page = || kobo_ui::Node::Text {
+            id: kobo_ui::NodeId(1),
+            text: "A page of a book.".to_owned(),
+            links: Vec::new(),
+        };
+
+        // Declares turns: the press becomes the declared action, exactly as a
+        // tap on the side zone would have.
+        let declared = Screen::new(1, vec![page()]).with_page_turns(ActionId(11), ActionId(12));
+        assert!(matches!(
+            page_key_message(&declared, &chrome, true),
+            Some(kobo_protocol::Message::Action {
+                action: ActionId(12)
+            })
+        ));
+        assert!(matches!(
+            page_key_message(&declared, &chrome, false),
+            Some(kobo_protocol::Message::Action {
+                action: ActionId(11)
+            })
+        ));
+
+        // Declares nothing: the application may make its own sense of the
+        // press, so it hears the raw intent.
+        let undeclared = Screen::new(1, vec![page()]);
+        assert!(matches!(
+            page_key_message(&undeclared, &chrome, true),
+            Some(kobo_protocol::Message::PageTurn { forward: true })
+        ));
+        assert!(matches!(
+            page_key_message(&undeclared, &chrome, false),
+            Some(kobo_protocol::Message::PageTurn { forward: false })
+        ));
+
+        // Covered by a dialog: nothing is sent. Not the declared action, and
+        // not the raw intent either -- an application that handled the raw
+        // intent would have paged the content underneath the dialog, which is
+        // the bug this state exists to make unrepresentable.
+        let modal = kobo_ui::Overlay::modal(
+            kobo_ui::NodeId(40),
+            "Leave?",
+            vec![kobo_ui::Node::Button {
+                id: kobo_ui::NodeId(41),
+                action: ActionId(6),
+                label: "Leave".to_owned(),
+                state: kobo_ui::ControlState::Enabled,
+                emphasis: kobo_ui::Emphasis::Primary,
+            }],
+        );
+        assert_eq!(
+            page_key_message(&declared.clone().with_overlay(modal.clone()), &chrome, true),
+            None
+        );
+        // Including when the screen never declared turns: the dialog is what
+        // the reader is answering either way.
+        assert_eq!(
+            page_key_message(&undeclared.with_overlay(modal), &chrome, true),
+            None
         );
     }
 

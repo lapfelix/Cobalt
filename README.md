@@ -13,12 +13,25 @@ over Wi-Fi. App releases are independent from Cobalt platform releases, so a
 new app can appear in Store without reinstalling or updating Cobalt.
 
 > [!IMPORTANT]
-> The **Kobo Clara BW N365 (device code 391)** and **Kobo Elipsa 2E N605
-> (device code 389)** are fully hardware-tested on the exact firmware and
-> kernel versions in the support matrix.
-> See the [device support matrix](docs/DEVICES.md#device-support-matrix) before
+> The **Kobo Clara BW N365 (device code 391)**, **Kobo Elipsa 2E N605 (device
+> code 389)**, and **Kobo Clara HD N249 (device code 376)** are fully
+> hardware-tested on the exact firmware and kernel versions in the support
+> matrix. See the
+> [device support matrix](docs/DEVICES.md#device-support-matrix) before
 > installing.
 > It is an independent project and is not affiliated with Rakuten Kobo.
+
+> [!TIP]
+> **Own an unsupported Kobo? Help test its port.** No coding is required.
+> Read the thread and comment with your exact model, firmware, and whether you
+> can run attended tests:
+> [Libra Colour](https://github.com/BandarLabs/Cobalt/issues/28),
+> [Libra 2](https://github.com/BandarLabs/Cobalt/issues/29),
+> [Clara Colour](https://github.com/BandarLabs/Cobalt/issues/30),
+> or [Aura](https://github.com/BandarLabs/Cobalt/issues/32).
+> Start with read-only checks; run panel tests only against the commit named by
+> a maintainer. See
+> [Contributing](CONTRIBUTING.md#device-testing).
 
 ## Features
 
@@ -31,6 +44,20 @@ new app can appear in Store without reinstalling or updating Cobalt.
 - Profile-driven full and partial refresh planning for supported panels
 - Static ARMv7 binaries with no device-side package manager
 - Recovery-safe app and catalog transactions
+
+## How it differs
+
+[NickelMenu](https://pgaskin.net/NickelMenu/) adds actions to Kobo's stock
+menu. [KOReader](https://koreader.rocks/) and
+[Plato](https://github.com/baskerville/plato) are reading apps. Cobalt is a
+platform for building and installing apps.
+
+Cobalt handles the common parts: screens, app lifecycle, drawing to the e-ink
+display, partial refreshes, touch input, device access, process isolation,
+testing, and signed installs. App authors can focus on their app instead of
+building those parts again.
+See the [FAQ](https://bandarlabs.github.io/Cobalt/faq.html) for a fuller
+comparison.
 
 ## Apps
 
@@ -66,9 +93,8 @@ Restart the reader and open **Cobalt** from Kobo's menu. Future applications
 are installed from **Store** over Wi-Fi. Full Cobalt updates remain under
 **Settings**.
 
-Readers running Cobalt `0.1.x` need the `0.2.0` platform update once to add
-Store. After that update, new and updated apps arrive independently through
-the app catalog.
+If you already use NickelMenu, Cobalt is added to it; existing entries are
+left alone.
 
 See [docs/INSTALL.md](docs/INSTALL.md) for the complete walkthrough and
 recovery steps.
@@ -169,6 +195,7 @@ cargo run -p kobo-cli -- run --sim --app pret-numerique
 
 Additional guides:
 
+- [Contributing](CONTRIBUTING.md)
 - [Developing Cobalt](docs/DEVELOPING.md)
 - [Working with devices](docs/DEVICES.md)
 - [Publishing apps](docs/APP_STORE.md)

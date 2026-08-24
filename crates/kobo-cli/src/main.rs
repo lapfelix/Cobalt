@@ -86,10 +86,17 @@ app=${1:-kobo-launcher}
 staged_key=\"$root/bootstrap/authorized_key\"
 if [ -s \"$staged_key\" ]; then
   umask 077
-  mkdir -p /root/.ssh
-  touch /root/.ssh/authorized_keys
-  chmod 700 /root/.ssh
-  chmod 600 /root/.ssh/authorized_keys
+  # Root's home is not /root on every Kobo: the i.MX6 firmware ships
+  # root:...:0:0:root:/:/bin/sh, and sshd resolves AuthorizedKeysFile
+  # relative to the home directory, so a key under /root never authenticates
+  # there. Ask /etc/passwd instead of assuming.
+  home=$(awk -F: '$1 == \"root\" { print $6 }' /etc/passwd)
+  home=\"${home%/}\"
+  keys=\"$home/.ssh/authorized_keys\"
+  mkdir -p \"$home/.ssh\"
+  touch \"$keys\"
+  chmod 700 \"$home/.ssh\"
+  chmod 600 \"$keys\"
   key=$(head -n 1 \"$staged_key\")
   found=false
   while IFS= read -r known; do
@@ -97,9 +104,9 @@ if [ -s \"$staged_key\" ]; then
       found=true
       break
     fi
-  done < /root/.ssh/authorized_keys
+  done < \"$keys\"
   if [ \"$found\" = false ]; then
-    printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys
+    printf '%s\\n' \"$key\" >> \"$keys\"
   fi
   rm -f \"$staged_key\"
   sync
@@ -241,6 +248,7 @@ enum SmokeStage {
     ReversiblePixels,
     ScreenSnapshot,
     FastFeedback,
+    WaitTiming,
 }
 
 #[cfg(feature = "device-write")]
@@ -249,13 +257,15 @@ impl SmokeStage {
     const CONFIRM_REVERSIBLE_PIXELS: &'static str = "REVERSIBLE_PIXELS_GC16";
     const CONFIRM_SCREEN_SNAPSHOT: &'static str = "SCREEN_SNAPSHOT_RESTORE";
     const CONFIRM_FAST_FEEDBACK: &'static str = "REVERSIBLE_PIXELS_DU";
+    const CONFIRM_WAIT_TIMING: &'static str = "WAIT_TIMING_GC16_DU";
 
     /// Every stage, so the usage text can never drift from what is accepted.
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::DisplayOnly,
         Self::ReversiblePixels,
         Self::ScreenSnapshot,
         Self::FastFeedback,
+        Self::WaitTiming,
     ];
 
     const fn confirmation(self) -> &'static str {
@@ -264,6 +274,7 @@ impl SmokeStage {
             Self::ReversiblePixels => Self::CONFIRM_REVERSIBLE_PIXELS,
             Self::ScreenSnapshot => Self::CONFIRM_SCREEN_SNAPSHOT,
             Self::FastFeedback => Self::CONFIRM_FAST_FEEDBACK,
+            Self::WaitTiming => Self::CONFIRM_WAIT_TIMING,
         }
     }
 
@@ -281,6 +292,7 @@ impl SmokeStage {
             Self::CONFIRM_REVERSIBLE_PIXELS => Some(Self::ReversiblePixels),
             Self::CONFIRM_SCREEN_SNAPSHOT => Some(Self::ScreenSnapshot),
             Self::CONFIRM_FAST_FEEDBACK => Some(Self::FastFeedback),
+            Self::CONFIRM_WAIT_TIMING => Some(Self::WaitTiming),
             _ => None,
         }
     }
@@ -291,6 +303,7 @@ impl SmokeStage {
             Self::ReversiblePixels => "OWNER_ATTENDED_REVERSIBLE_PIXELS_GC16",
             Self::ScreenSnapshot => "OWNER_ATTENDED_SCREEN_SNAPSHOT_RESTORE",
             Self::FastFeedback => "OWNER_ATTENDED_REVERSIBLE_PIXELS_DU",
+            Self::WaitTiming => "OWNER_ATTENDED_WAIT_TIMING_GC16_DU",
         }
     }
 }
@@ -3518,7 +3531,8 @@ fn undo_setup(reader: &setup::Mounted, eject: bool) -> Result<(), String> {
     // reach it.
     println!(
         "\nA key this tool staged is taken back with the archive it was in. One the\n\
-         reader has already extracted stays in /root/.ssh/authorized_keys, which is\n\
+         reader has already extracted stays in authorized_keys under root's home\n\
+         directory (/.ssh on the i.MX6 readers, /root/.ssh elsewhere), which is\n\
          on the root filesystem, and USB does not reach it. To remove that one, edit\n\
          the file over SSH and delete the line ending in 'kobo-cobalt'."
     );
@@ -5945,10 +5959,14 @@ mod tests {
     #[test]
     fn the_start_script_installs_the_staged_public_key_once() {
         let script = super::START_SCRIPT;
-        assert!(script.contains("/root/.ssh/authorized_keys"));
+        // The home directory is read from /etc/passwd rather than assumed to
+        // be /root: the i.MX6 firmware gives root a home of `/`, and a key
+        // installed under /root never authenticates there.
+        assert!(script.contains("awk -F: '$1 == \"root\" { print $6 }' /etc/passwd"));
+        assert!(script.contains("keys=\"$home/.ssh/authorized_keys\""));
         assert!(script.contains("while IFS= read -r known"));
         assert!(script.contains("if [ \"$known\" = \"$key\" ]"));
-        assert!(script.contains("printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys"));
+        assert!(script.contains("printf '%s\\n' \"$key\" >> \"$keys\""));
         assert!(script.contains("rm -f \"$staged_key\""));
     }
 
