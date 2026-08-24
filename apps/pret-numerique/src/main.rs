@@ -24,8 +24,9 @@
 use kobo_json::{ObjectBuilder, Value};
 use kobo_sdk::keyboard::{TextEntry, Typing};
 use kobo_sdk::{
-    action_id, BannerLevel, Context, Credential, Failure, Glyph, Header, KoboApp, PictureHandle,
-    Screen, ScreenBuilder, Space, StoreResult, Task, TaskError, TaskId, TaskOutcome, TilePicture,
+    action_id, BandAlign, BannerLevel, Context, ControlState, Credential, Failure, Glyph, Header,
+    KoboApp, PictureHandle, Screen, ScreenBuilder, SlotWidth, Space, StoreResult, Task, TaskError,
+    TaskId, TaskOutcome, TilePicture,
 };
 use std::process::ExitCode;
 
@@ -707,11 +708,10 @@ impl PretNumerique {
     }
 
     /// Previous and Next for a list that does not scroll.
-    ///
-    /// Both controls are always drawn, and the one with nowhere to go is drawn
-    /// disabled rather than removed: a control that comes and goes moves the
-    /// other one under the reader's thumb between pages.
     fn page_controls(screen: ScreenBuilder, paging: Paging) -> ScreenBuilder {
+        if !paging.has_previous && !paging.has_next {
+            return screen;
+        }
         let position = match paging.total_pages {
             Some(total) if total > 1 => format!("Page {} of {total}", paging.page),
             _ => format!("Page {}", paging.page),
@@ -1197,7 +1197,9 @@ impl PretNumerique {
                 // consume the optional rows on a Clara, but the full blurb
                 // must remain one tap away even then.
                 .compose(|mut screen| {
-                    if self.cover.is_some() && result.description.is_some() {
+                    if result.description.is_some()
+                        && (self.cover.is_some() || self.note.is_some() || self.watch.is_some())
+                    {
                         screen = screen.top_bar_action(DESCRIPTION, "Description");
                     }
                     if result.related_handle().is_some() {
@@ -1206,50 +1208,63 @@ impl PretNumerique {
                     screen
                 }),
             0,
-        )
-        .heading(result.title.clone());
-        if let Some(cover) = self.cover {
-            screen = screen.unframed_picture(cover, 24);
-        }
+        );
         // The note goes above everything the screen might have to leave out.
         // A borrow that was never sent reports itself here, and the panel drops
         // whatever runs past the bottom without saying so.
         screen = self.note_block(self.watch_block(screen), BannerLevel::Attention);
-        screen = screen.facts(self.detail_facts(result));
-        // The tap is the borrow, so the row has to say so before it is taken.
-        // A hold is offered in its place only when no library has a copy: while
-        // one of them does, the book is available and joining a queue for it
-        // would be a worse answer than borrowing it.
+        let facts = self.detail_facts(result);
+        screen = match self.cover {
+            Some(cover) => {
+                let title = result.title.clone();
+                screen.band(
+                    BandAlign::Top,
+                    vec![
+                        (
+                            SlotWidth::Fill,
+                            Box::new(move |slot: ScreenBuilder| slot.heading(title).facts(facts))
+                                as Box<dyn FnOnce(ScreenBuilder) -> ScreenBuilder>,
+                        ),
+                        (
+                            SlotWidth::Fixed(240),
+                            Box::new(move |slot: ScreenBuilder| slot.unframed_picture(cover, 48)),
+                        ),
+                    ],
+                )
+            }
+            None => screen.heading(result.title.clone()).facts(facts),
+        };
+        // The section tells the reader what tapping a library does. Keep the
+        // rows to the useful fact -- whether that library has a copy -- rather
+        // than repeating the action in every row.
         let borrowable = result.is_available();
         screen = if borrowable {
-            screen
-                .section("Choose a library")
-                .secondary("Tapping one borrows it, onto your home server.")
+            screen.section("Choose a library")
         } else {
-            screen
-                .section("Place a hold")
-                .secondary("Every copy is out. Tapping a library puts you on its waiting list.")
+            screen.section("Place a hold")
         };
-        screen = screen.rows(
+        screen = screen.band(
+            BandAlign::Middle,
             result
                 .sources
                 .iter()
                 .enumerate()
                 .map(|(source_index, source)| {
-                    let status = availability_label(source);
-                    let action = if source.available {
-                        "Borrow & send"
+                    let label = if source.available {
+                        format!("{} · Borrow", source.catalog_name)
                     } else if borrowable {
-                        "Unavailable"
+                        format!("{} · Unavailable", source.catalog_name)
                     } else {
-                        "Place a hold"
+                        format!("{} · Reserve", source.catalog_name)
                     };
-                    (
-                        format!("source.{source_index}"),
-                        source.catalog_name.clone(),
-                        format!("{status} · {action}"),
-                        Glyph::Globe,
-                    )
+                    let state = if source.available || !borrowable {
+                        ControlState::Enabled
+                    } else {
+                        ControlState::Disabled
+                    };
+                    (SlotWidth::Fill, move |slot: ScreenBuilder| {
+                        slot.button_with_state(format!("source.{source_index}"), label, state)
+                    })
                 }),
         );
         // Everything below the libraries is optional, and drawn only as far as
@@ -1257,22 +1272,6 @@ impl PretNumerique {
         // content area and drops the rest in silence, and what it would drop
         // here is the control the reader came for.
         let slots = self.detail_extras();
-        // The first author only. A book with four of them has four rows on a
-        // panel with room for one, and the first is the one a reader means.
-        if slots >= 1 {
-            if let Some(author) = result.authors.first() {
-                screen = screen.section_rows(
-                    "More by this author",
-                    None,
-                    [(
-                        "author.0".to_owned(),
-                        author.clone(),
-                        "At either library".to_owned(),
-                        Glyph::Circle,
-                    )],
-                );
-            }
-        }
         // The opening of the blurb, and the way into the rest of it. A row
         // rather than the paragraph this was, because a description runs to
         // thousands of characters and a book's screen has room for two lines of
@@ -1284,10 +1283,28 @@ impl PretNumerique {
                 [(
                     DESCRIPTION.to_owned(),
                     compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS),
-                    "Read the whole description".to_owned(),
+                    String::new(),
                     Glyph::Book,
                 )],
             );
+        }
+        // The first author only. A book with four of them has four rows on a
+        // panel with room for one, and the first is the one a reader means.
+        // It follows the book's own description: the reader first learns what
+        // this title is, then decides whether to browse the author's others.
+        if slots >= 1 {
+            if let Some(author) = result.authors.first() {
+                screen = screen.section_rows(
+                    "More by this author",
+                    None,
+                    [(
+                        "author.0".to_owned(),
+                        author.clone(),
+                        String::new(),
+                        Glyph::Circle,
+                    )],
+                );
+            }
         }
         screen.build()
     }
@@ -4328,24 +4345,6 @@ fn resolve_explanation(job: &Job) -> String {
     }
 }
 
-fn availability_label(source: &Source) -> String {
-    let value = source.availability.trim();
-    if source.available {
-        if value.is_empty() || value.eq_ignore_ascii_case("available") {
-            "Available now".to_owned()
-        } else {
-            value.to_owned()
-        }
-    } else if value.is_empty()
-        || value.eq_ignore_ascii_case("available")
-        || value.eq_ignore_ascii_case("unavailable")
-    {
-        "Not currently available".to_owned()
-    } else {
-        value.to_owned()
-    }
-}
-
 fn state_label(state: &str) -> &str {
     match state {
         "ready" => "Signed in",
@@ -5014,8 +5013,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_label, availability_summary, bookstore_category_summary, category_summary,
-        compact_message, decode_cover, is_active_state, kind_label, ordinal, parse_books,
+        availability_summary, bookstore_category_summary, category_summary, compact_message,
+        decode_cover, is_active_state, kind_label, ordinal, parse_books,
         parse_bookstore_categories, parse_bookstore_category, parse_browse,
         parse_catalog_status_note, parse_categories, parse_groups, parse_health, parse_job,
         parse_jobs, parse_publications, parse_search, parse_shelf, plain_date, publication_summary,
@@ -5359,7 +5358,7 @@ mod tests {
         // What was cut was cut from the bottom, not from the middle: the
         // control the reader came for is still on the panel.
         assert!(drawn.contains("Choose a library"));
-        assert!(drawn.contains("Read the whole description"));
+        assert!(drawn.contains("On the desert world Arrakis"));
     }
 
     #[test]
@@ -5509,7 +5508,6 @@ mod tests {
     fn labels_turn_catalog_values_into_reader_copy() {
         assert_eq!(kind_label("return"), "Return");
         assert_eq!(kind_label("import"), "Send");
-        assert_eq!(availability_label(&source()), "Available now");
     }
 
     #[test]
@@ -6346,6 +6344,47 @@ mod tests {
     }
 
     #[test]
+    fn a_detail_cover_is_on_the_right_and_library_actions_share_a_row() {
+        typeset();
+        let app = PretNumerique {
+            view: View::Detail,
+            detail: Some(described(publication(
+                "Cover fixture",
+                vec![source(), out_of_copies()],
+            ))),
+            cover: Some(TilePicture::new(super::PictureHandle(41), 260, 419)),
+            metrics: CLARA_BW_METRICS,
+            ..PretNumerique::default()
+        };
+        let layout = app
+            .screen()
+            .layout_with(&CLARA_BW_METRICS, &device_chrome());
+        let picture = layout
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, LayoutKind::Picture(_)))
+            .expect("the cover is drawn");
+        let heading = layout
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, LayoutKind::Heading(..)))
+            .expect("the title is drawn");
+        assert!(
+            picture.rect.x > heading.rect.x,
+            "cover must follow the facts"
+        );
+
+        let buttons = layout
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, LayoutKind::Button(..)))
+            .collect::<Vec<_>>();
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].rect.y, buttons[1].rect.y);
+        assert!(buttons[0].rect.x < buttons[1].rect.x);
+    }
+
+    #[test]
     fn bookstore_category_rows_and_favorites_fit_every_panel() {
         typeset();
         for (name, metrics) in CONTENT_PANELS {
@@ -6438,6 +6477,17 @@ mod tests {
                 };
                 let screen = app.screen();
                 let layout = screen.layout_with(&metrics, &device_chrome());
+                let has_page_control = layout.nodes.iter().any(|node| {
+                    matches!(
+                        node.kind,
+                        LayoutKind::Button(action, ..)
+                            if action == action_id(PREVIOUS_PAGE)
+                                || action == action_id(NEXT_PAGE)
+                    )
+                });
+                if !has_page_control {
+                    continue;
+                }
                 for (action, label) in [(PREVIOUS_PAGE, "Previous page"), (NEXT_PAGE, "Next page")]
                 {
                     let wanted = action_id(action);
@@ -6981,7 +7031,7 @@ mod tests {
     }
 
     #[test]
-    fn the_page_controls_are_drawn_disabled_rather_than_taken_away() {
+    fn the_page_controls_are_taken_away_when_a_list_fits_one_page() {
         let app = PretNumerique {
             view: View::Results,
             results: (0..rows() - 1)
@@ -6990,13 +7040,10 @@ mod tests {
             ..PretNumerique::default()
         };
         let drawn = format!("{:?}", app.results_screen());
-        assert!(drawn.contains("Previous page"), "{drawn}");
-        assert!(drawn.contains("Next page"));
-        assert_eq!(
-            drawn.matches("state: Disabled").count(),
-            2,
-            "one page means neither control leads anywhere: {drawn}"
-        );
+        assert!(!drawn.contains("Previous page"), "{drawn}");
+        assert!(!drawn.contains("Next page"));
+        assert!(!drawn.contains("Page 1"));
+        assert_eq!(drawn.matches("state: Disabled").count(), 0);
 
         let paged = PretNumerique {
             view: View::Results,
@@ -7510,7 +7557,7 @@ mod tests {
         let drawn = format!("{:?}", borrowable.detail_screen());
         assert!(drawn.contains("Choose a library"));
         assert!(drawn.contains("Available now at Montréal"));
-        assert!(drawn.contains("Borrow & send"));
+        assert!(!drawn.contains("Borrow & send"));
         assert!(
             !drawn.contains("Place a hold"),
             "a book another library has is not a hold: {drawn}"
@@ -7524,8 +7571,7 @@ mod tests {
         let drawn = format!("{:?}", held.detail_screen());
         assert!(drawn.contains("Place a hold"));
         assert!(drawn.contains("Every copy is out at BAnQ"));
-        assert!(drawn.contains("puts you on its waiting list"));
-        assert!(!drawn.contains("Borrow & send"));
+        assert!(!drawn.contains("puts you on its waiting list"));
     }
 
     #[test]

@@ -6,7 +6,6 @@ tap Qui va séduire Henry ?
 wait-for Book details
 expect Every copy is out at Montréal and BAnQ
 expect Place a hold
-expect puts you on its waiting list
 expect-missing Borrow & send
 clean
 tap Montréal

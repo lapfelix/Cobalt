@@ -8,9 +8,9 @@ wait-for Book details
 expect Marilou Addison
 expect 312 pages
 expect About this book
-expect Read the whole description
+expect Description
 clean
-tap Read the whole description
+tap Description
 wait-for About this book
 expect Un été de trop
 expect Page 1 of

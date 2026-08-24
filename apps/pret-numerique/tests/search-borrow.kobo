@@ -16,7 +16,9 @@ clean
 tap Le potager du fixture
 wait-for Book details
 expect Book details
-expect Tapping one borrows
+# The section heading and the library's availability are enough context for a
+# single reader; the repeated helper sentence is intentionally gone.
+expect Choose a library
 # Choosing the library is the borrow: no second screen, no second tap.
 tap Montréal
 wait-for Waiting to start
