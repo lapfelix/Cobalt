@@ -223,6 +223,16 @@ struct SeriesInfo {
     position: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Recommendation {
+    source: String,
+    label: String,
+    description: Option<String>,
+    url: Option<String>,
+    constellation_favorite: bool,
+    difficulty: Option<i64>,
+}
+
 /// One book, however the reader arrived at it: a search, a discovery group, a
 /// category, an author, or another book's neighbours.
 ///
@@ -259,6 +269,8 @@ struct Publication {
     goodreads_ratings_count: Option<i64>,
     goodreads_reviews_count: Option<i64>,
     sources: Vec<Source>,
+    /// Curated labels that were cross-referenced with a real library holding.
+    recommendations: Vec<Recommendation>,
     /// Why the proxy included this row on a related-books screen.
     basis: Option<String>,
 }
@@ -871,6 +883,9 @@ impl PretNumerique {
             0,
         );
         screen = self.note_block(screen, BannerLevel::Attention);
+        screen = screen
+            .heading("Curated shelves")
+            .text("Library picks and Québec reading lists, cross-referenced with your libraries.");
         let favorites = self.favorite_categories();
         if !favorites.is_empty() {
             screen = screen.section_rows(
@@ -1324,9 +1339,12 @@ impl PretNumerique {
     /// saying, cut to what the panel holds.
     ///
     /// The order is the whole of the design here, because a six inch panel has
-    /// room for three of these and the rest are dropped. The author and where a
-    /// copy is are what a borrow cannot be made without. A PDF warning comes
-    /// next, since it is the one fact that changes the answer. Then what a
+    /// room for three of these and the rest are dropped. The author is the
+    /// fact a reader needs to orient themselves. A PDF warning comes next,
+    /// since it is the one fact that changes the answer. Availability is
+    /// intentionally omitted here: the library action rows below already
+    /// show which catalog can be borrowed or reserved, and repeating it in
+    /// the facts wastes one of the scarce detail rows. Then what a
     /// reader chooses on: whether other people liked it, and how much of it
     /// there is -- which for an audiobook is the fact the reader most wants.
     /// Then the edition, which is the part nobody has ever decided a borrow on.
@@ -1344,7 +1362,10 @@ impl PretNumerique {
         });
         [
             ("Author", Some(author_line(&book.authors))),
-            ("Availability", Some(availability_summary(book))),
+            (
+                "Recommended by",
+                recommendation_label(&book.recommendations),
+            ),
             ("Length", length_label(book)),
             (
                 "Published",
@@ -3981,6 +4002,24 @@ fn availability_state(publication: &Publication) -> &'static str {
     }
 }
 
+fn recommendation_label(recommendations: &[Recommendation]) -> Option<String> {
+    if recommendations.is_empty() {
+        return None;
+    }
+    if recommendations
+        .iter()
+        .any(|recommendation| recommendation.constellation_favorite)
+    {
+        return Some("Constellations coup de coeur".to_owned());
+    }
+    let labels = recommendations
+        .iter()
+        .map(|recommendation| recommendation.label.as_str())
+        .take(2)
+        .collect::<Vec<_>>();
+    (!labels.is_empty()).then(|| labels.join(" · "))
+}
+
 fn publication_summary(publication: &Publication) -> String {
     let reason = match publication.basis.as_deref() {
         Some("series") => "In this series",
@@ -4000,8 +4039,11 @@ fn publication_summary(publication: &Publication) -> String {
     // A PDF on a six-inch panel is a page of a paper book photographed, and no
     // amount of type setting fixes it. The reader is told before they borrow.
     let format = if publication.pdf_only { " · PDF" } else { "" };
+    let curated = recommendation_label(&publication.recommendations)
+        .map(|label| format!(" · {label}"))
+        .unwrap_or_default();
     format!(
-        "{reason}{} · {}{format}{goodreads}",
+        "{reason}{} · {}{format}{goodreads}{curated}",
         short_author_line(&publication.authors),
         availability_state(publication)
     )
@@ -4567,6 +4609,50 @@ fn parse_series(result: &Value) -> Option<SeriesInfo> {
     })
 }
 
+fn parse_recommendations(result: &Value) -> Vec<Recommendation> {
+    result
+        .get("recommendations")
+        .and_then(Value::as_array)
+        .map(|recommendations| {
+            recommendations
+                .iter()
+                .filter_map(|recommendation| {
+                    let label = recommendation
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .or_else(|| recommendation.get("source").and_then(Value::as_str))?
+                        .trim();
+                    if label.is_empty() {
+                        return None;
+                    }
+                    Some(Recommendation {
+                        source: recommendation
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        label: label.to_owned(),
+                        description: recommendation
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        url: recommendation
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        constellation_favorite: recommendation
+                            .get("constellation_favorite")
+                            .or_else(|| recommendation.get("constellationFavorite"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        difficulty: recommendation.get("difficulty").and_then(Value::as_i64),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_publication(result: &Value) -> Option<Publication> {
     let title = result.get("title")?.as_str()?.to_owned();
     let authors = result
@@ -4659,6 +4745,7 @@ fn parse_publication(result: &Value) -> Option<Publication> {
             .get("goodreads_reviews_count")
             .and_then(Value::as_i64),
         sources,
+        recommendations: parse_recommendations(result),
         basis: result
             .get("basis")
             .and_then(Value::as_str)
@@ -5196,6 +5283,7 @@ mod tests {
             goodreads_ratings_count: None,
             goodreads_reviews_count: None,
             sources,
+            recommendations: vec![],
             basis: None,
         }
     }
@@ -5293,6 +5381,27 @@ mod tests {
         .expect("valid search response");
         assert_eq!(results[0].sources[0].handle, "opaque");
         assert_eq!(results[0].sources[0].catalog, "banq");
+    }
+
+    #[test]
+    fn parser_keeps_curated_recommendations_and_the_constellations_badge() {
+        let results = parse_search(
+            br#"{"results":[{"title":"Book","authors":["Author"],"recommendations":[{"source":"constellations","label":"Constellations coup de coeur","description":"A good pick.","constellation_favorite":true}],"sources":[{"handle":"opaque","catalog":"banq","catalog_name":"BAnQ","availability":"available","is_available":true}]}]}"#,
+        )
+        .expect("valid search response");
+        assert_eq!(results[0].recommendations.len(), 1);
+        assert!(results[0].recommendations[0].constellation_favorite);
+        assert!(publication_summary(&results[0]).contains("Constellations coup de coeur"));
+        let screen = format!(
+            "{:?}",
+            PretNumerique {
+                detail: Some(results[0].clone()),
+                ..PretNumerique::default()
+            }
+            .detail_screen()
+        );
+        assert!(screen.contains("Recommended by"));
+        assert!(screen.contains("Constellations coup de coeur"));
     }
 
     #[test]
@@ -5451,7 +5560,7 @@ mod tests {
         assert_eq!(short.detail_fact_rows(1), 4);
         let drawn = format!("{:?}", short.detail_screen());
         assert!(drawn.contains("Fixture author"));
-        assert!(drawn.contains("Available now at Montréal"));
+        assert!(drawn.contains("Montréal · Borrow"));
         assert!(!drawn.contains("Éditions"), "{drawn}");
         // What was cut was cut from the bottom, not from the middle: the
         // control the reader came for is still on the panel.
@@ -7097,7 +7206,8 @@ mod tests {
             }
             .detail_screen()
         );
-        assert!(drawn.contains("Available now at Montréal"));
+        assert!(drawn.contains("Montréal · Borrow"));
+        assert!(drawn.contains("BAnQ · Unavailable"));
         assert!(drawn.contains("Montréal"));
         assert!(drawn.contains("BAnQ"));
     }
@@ -7680,7 +7790,7 @@ mod tests {
         };
         let drawn = format!("{:?}", borrowable.detail_screen());
         assert!(drawn.contains("Choose a library"));
-        assert!(drawn.contains("Available now at Montréal"));
+        assert!(drawn.contains("Montréal · Borrow"));
         assert!(!drawn.contains("Borrow & send"));
         assert!(
             !drawn.contains("Place a hold"),
@@ -7694,7 +7804,7 @@ mod tests {
         };
         let drawn = format!("{:?}", held.detail_screen());
         assert!(drawn.contains("Place a hold"));
-        assert!(drawn.contains("Every copy is out at BAnQ"));
+        assert!(drawn.contains("BAnQ · Reserve"));
         assert!(!drawn.contains("puts you on its waiting list"));
     }
 

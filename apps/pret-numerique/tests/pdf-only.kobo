@@ -25,7 +25,7 @@ clean
 tap Le guide illustré du potager
 wait-for Book details
 expect PDF only, hard to read here
-expect Available now at Montréal
+expect Montréal · Borrow
 clean
 tap Back
 wait-for PDF included

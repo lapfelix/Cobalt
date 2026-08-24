@@ -33,7 +33,6 @@ wait-for Page 1
 clean
 tap Mensonges
 wait-for Book details
-# The book screen still names every library and its state: it is the only
-# screen where that can be acted on.
-expect Available now at Montréal
+# The book screen exposes each library as the actionable borrow/reserve row.
+expect Montréal · Borrow
 clean

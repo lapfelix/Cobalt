@@ -79,9 +79,9 @@ time something is.
 
 ## Availability across the libraries
 
-One library being out of copies is not the book being unavailable. Every row and
-every book's screen carries the best answer across both, and names the library
-that has it: `Available now at BAnQ`. A hold is offered instead of a borrow only
+One library being out of copies is not the book being unavailable. List rows
+carry the best answer across both, while the book screen names each library
+directly on its borrow/reserve action. A hold is offered instead of a borrow only
 when no library has a copy at all, because joining a queue for a book the other
 library has on the shelf is a worse answer than borrowing it.
 
