@@ -2189,7 +2189,7 @@ const PRET_ACTIVE_JOBS: [(&str, &str, &str, &str, &str); 6] = [
         "return",
         "Fixture return title",
         "montreal",
-        "fixture-book-montreal",
+        "shelf:fixture-book-montreal",
     ),
     (
         "fixture-hook",
@@ -2280,8 +2280,14 @@ fn pret_books_body() -> Vec<u8> {
     } else {
         ""
     };
+    let returned = pret_active_state("fixture-return-job", false) == "returned";
+    let settled_return = if returned {
+        r#","return_state":"returned""#
+    } else {
+        ""
+    };
     format!(
-        r#"[{{"id":"fixture-book-montreal","title":"Fixture return title","catalog":"montreal","file_name":"Fixture return title.lcpl"}},{{"id":"fixture-book-banq","title":"Fixture BAnQ title","catalog":"banq","file_name":"Fixture BAnQ title.lcpl"}},{{"id":"fixture-book-hook","title":"Fixture unsent title","catalog":"banq","file_name":"Fixture unsent title.lcpl"}},{{"id":"fixture-book-uncertain","title":"Fixture uncertain return","catalog":"montreal","file_name":"Fixture uncertain return.lcpl"{uncertain_return}}}]"#
+        r#"[{{"id":"fixture-book-montreal","title":"Fixture return title","catalog":"montreal","file_name":"Fixture return title.lcpl"{settled_return}}},{{"id":"fixture-book-banq","title":"Fixture BAnQ title","catalog":"banq","file_name":"Fixture BAnQ title.lcpl"}},{{"id":"fixture-book-hook","title":"Fixture unsent title","catalog":"banq","file_name":"Fixture unsent title.lcpl"}},{{"id":"fixture-book-uncertain","title":"Fixture uncertain return","catalog":"montreal","file_name":"Fixture uncertain return.lcpl"{uncertain_return}}}]"#
     )
     .into_bytes()
 }
@@ -2645,14 +2651,21 @@ fn pret_cover_body() -> Vec<u8> {
 /// loan the home server has no file for. Then a hold at the back of one queue
 /// and one at the front of another.
 fn pret_shelf_body() -> Vec<u8> {
-    r#"[
-{"id":"shelf-montreal-loan","title":"Fixture return title","authors":["Ariane Michaud"],"catalog":"montreal","kind":"loan","since":"2026-08-14T19:06:05.328Z","until":"2026-09-11T19:06:05.328Z"},
-{"id":"shelf-banq-loan","title":"Fixture BAnQ title","authors":["Luc Blanvillain"],"catalog":"banq","kind":"loan","since":"2026-08-22T00:13:56.991Z","until":"2026-09-12T00:13:56.991Z"},
-{"id":"shelf-elsewhere","title":"Le Somnambule","authors":["Lars Kepler"],"catalog":"banq","kind":"loan","since":"2026-08-22T01:15:33.501Z","until":"2026-09-12T01:15:33.501Z"},
-{"id":"shelf-montreal-hold","title":"Mûre secrète et melon rafraîchissant","authors":["Sandra Verilli"],"catalog":"montreal","kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7},
-{"id":"shelf-banq-hold","title":"Typiquement Eliza","authors":["Sophie Lee"],"catalog":"banq","kind":"hold","since":"2026-08-24T01:04:22.672Z","until":"2026-12-17T02:26:59.919Z","position":1,"total":4}]"#
-        .as_bytes()
-        .to_vec()
+    let return_state = pret_active_state("fixture-return-job", false);
+    let return_fields = if return_state == "queued" {
+        String::new()
+    } else {
+        format!(r#","return_job_id":"fixture-return-job","return_state":"{return_state}""#)
+    };
+    format!(
+r#"[
+{{"id":"shelf-montreal-loan","publication_handle":"fixture-book-montreal","title":"Fixture return title","authors":["Ariane Michaud"],"catalog":"montreal","kind":"loan","since":"2026-08-14T19:06:05.328Z","until":"2026-09-11T19:06:05.328Z"{return_fields}}},
+{{"id":"shelf-banq-loan","publication_handle":"fixture-book-banq","title":"Fixture BAnQ title","authors":["Luc Blanvillain"],"catalog":"banq","kind":"loan","since":"2026-08-22T00:13:56.991Z","until":"2026-09-12T00:13:56.991Z"}},
+{{"id":"shelf-elsewhere","publication_handle":"fixture-elsewhere","title":"Le Somnambule","authors":["Lars Kepler"],"catalog":"banq","kind":"loan","since":"2026-08-22T01:15:33.501Z","until":"2026-09-12T01:15:33.501Z"}},
+{{"id":"shelf-montreal-hold","publication_handle":"fixture-montreal-hold","title":"Mûre secrète et melon rafraîchissant","authors":["Sandra Verilli"],"catalog":"montreal","kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7}},
+{{"id":"shelf-banq-hold","publication_handle":"fixture-banq-hold","title":"Typiquement Eliza","authors":["Sophie Lee"],"catalog":"banq","kind":"hold","since":"2026-08-24T01:04:22.672Z","until":"2026-12-17T02:26:59.919Z","position":1,"total":4}}]"#
+    )
+    .into_bytes()
 }
 
 /// One value out of a query string, undoing only the escaping the app applies.
@@ -2824,7 +2837,9 @@ fn pret_fixture_post(
         // A hold is accepted exactly as a borrow is: asynchronous, started from
         // `queued`, and never retried for the reader.
         return pret_accept("fixture-hold-job");
-    } else if path.starts_with("/books/") && path.ends_with("/return") {
+    } else if (path.starts_with("/books/") || path.starts_with("/shelf/"))
+        && path.ends_with("/return")
+    {
         return pret_accept("fixture-return-job");
     } else {
         return Err(kobo_protocol::TaskError::NotFound);
@@ -3999,8 +4014,9 @@ mod tests {
         assert!(shelf.contains(r#""until":"2026-09-11T19:06:05.328Z""#));
         assert!(shelf.contains(r#""title":"Le Somnambule""#));
         // The back of one queue and the front of another.
-        assert!(shelf.contains(r#""kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7"#));
-        assert!(shelf.contains(r#""position":1,"total":4"#));
+        assert!(shelf.contains(r#""position":7,"total":7"#));
+        assert!(shelf.contains(r#""position":1"#));
+        assert!(shelf.contains(r#""total":4"#));
 
         let related = pret_get("/publications/fixture-triplettes/related");
         assert!(related.contains("Les mains sur le volant"));

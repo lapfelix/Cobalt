@@ -394,6 +394,9 @@ impl Paging {
 /// One book the libraries say is yours: out on loan, or waiting for you.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ShelfEntry {
+    publication_handle: String,
+    return_job_id: Option<String>,
+    return_state: Option<String>,
     title: String,
     authors: Vec<String>,
     catalog: String,
@@ -558,6 +561,7 @@ struct PretNumerique {
     books: Vec<Book>,
     books_page: usize,
     shelf: Vec<ShelfEntry>,
+    shelf_loaded: bool,
     holds_page: usize,
     selected_book: Option<usize>,
     jobs: Vec<Job>,
@@ -618,6 +622,7 @@ impl Default for PretNumerique {
             books: Vec::new(),
             books_page: 0,
             shelf: Vec::new(),
+            shelf_loaded: false,
             holds_page: 0,
             selected_book: None,
             jobs: Vec::new(),
@@ -1579,18 +1584,6 @@ impl PretNumerique {
                 )],
             );
         }
-        // A loan the library has but the home server does not: borrowed
-        // somewhere else. There is nothing here to return, so it is a sentence
-        // rather than a row that leads nowhere.
-        let elsewhere = self.unheld_loans();
-        if elsewhere > 0 {
-            screen = screen.secondary(match elsewhere {
-                1 => "Your library also has one loan that is not on your home server.".to_owned(),
-                many => {
-                    format!("Your library also has {many} loans that are not on your home server.")
-                }
-            });
-        }
         let books = self.filtered_books();
         if books.is_empty() {
             screen = screen.empty_state("No loans from this library.");
@@ -1634,7 +1627,7 @@ impl PretNumerique {
         )
         .heading("Return this book?")
         .text(format!(
-            "{}\n{}\n\nThe loan stays on your home server until {} confirms the return.",
+            "{}\n{}\n\nThe loan stays on your home server until {} confirms the return. The local copy is kept.",
             book.title,
             catalog_label(&book.catalog),
             catalog_label(&book.catalog)
@@ -1697,6 +1690,21 @@ impl PretNumerique {
     }
 
     fn filtered_books(&self) -> Vec<Book> {
+        let remote_loans = self
+            .shelf
+            .iter()
+            .filter(|entry| entry.is_loan() && self.filter.matches(&entry.catalog))
+            .map(|entry| Book {
+                id: format!("shelf:{}", entry.publication_handle),
+                title: entry.title.clone(),
+                catalog: entry.catalog.clone(),
+                file_name: "Remote loan".to_owned(),
+                return_state: entry.return_state.clone(),
+            })
+            .collect::<Vec<_>>();
+        if self.shelf_loaded || !remote_loans.is_empty() {
+            return remote_loans;
+        }
         self.books
             .iter()
             .filter(|book| self.filter.matches(&book.catalog))
@@ -2084,18 +2092,10 @@ impl PretNumerique {
         })
     }
 
-    /// The loans the library says are out that the home server has no file for
-    /// -- borrowed somewhere else, most likely on the library's own site.
+    /// The activity feed is authoritative now; local file presence is not a
+    /// condition for showing a loan.
     fn unheld_loans(&self) -> usize {
-        self.shelf
-            .iter()
-            .filter(|entry| entry.is_loan() && self.filter.matches(&entry.catalog))
-            .filter(|entry| {
-                !self.books.iter().any(|book| {
-                    book.catalog == entry.catalog && same_title(&entry.title, &book.title)
-                })
-            })
-            .count()
+        0
     }
 
     /// How many loans fit under whatever else Library has to say today.
@@ -2383,6 +2383,9 @@ impl PretNumerique {
             return format!("{catalog} · Not sent to your reader");
         }
         if let Some(state) = book.return_state.as_deref() {
+            if state == "returned" {
+                return format!("{catalog} · Returned · local copy kept");
+            }
             return format!("{catalog} · {}", state_label(state));
         }
         match self
@@ -2715,7 +2718,11 @@ impl PretNumerique {
             .build()
             .to_json();
         let task = Task::Post {
-            url: format!("{API}/books/{}/return", book.id),
+            url: if let Some(handle) = book.id.strip_prefix("shelf:") {
+                format!("{API}/shelf/{}/return", percent_encode(handle))
+            } else {
+                format!("{API}/books/{}/return", percent_encode(&book.id))
+            },
             body,
             content_type: "application/json".to_owned(),
             credential: Some(Self::credential()),
@@ -3014,9 +3021,12 @@ impl PretNumerique {
             RequestKind::Shelf => match parse_shelf(body) {
                 Some(entries) => {
                     self.shelf = entries;
+                    self.shelf_loaded = true;
                     self.holds_page = 0;
                 }
                 None => {
+                    self.shelf.clear();
+                    self.shelf_loaded = true;
                     self.note = Some("The proxy returned an unreadable list of loans.".to_owned());
                 }
             },
@@ -3999,6 +4009,13 @@ impl PretNumerique {
             self.show(context);
             return;
         }
+        if book.return_state.as_deref() == Some("returned") {
+            self.note = Some(
+                "That loan was returned. The local copy remains on your home server.".to_owned(),
+            );
+            self.show(context);
+            return;
+        }
         self.selected_book = Some(index);
         self.deeper(context, View::ConfirmReturn);
         self.show(context);
@@ -4539,7 +4556,7 @@ fn settled_message(job: &Job) -> (BannerLevel, String) {
         ),
         "returned" => (
             BannerLevel::Info,
-            format!("Returned. {library} has it back."),
+            format!("Returned. {library} has it back; the local copy was kept."),
         ),
         "auth_required" => (
             BannerLevel::Attention,
@@ -5139,6 +5156,21 @@ fn parse_shelf(body: &[u8]) -> Option<Vec<ShelfEntry>> {
             .filter_map(|entry| {
                 let holds = entry.get("holds");
                 Some(ShelfEntry {
+                    publication_handle: entry
+                        .get("publication_handle")
+                        .or_else(|| entry.get("publicationHandle"))
+                        .and_then(Value::as_str)?
+                        .to_owned(),
+                    return_job_id: entry
+                        .get("return_job_id")
+                        .or_else(|| entry.get("returnJobID"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    return_state: entry
+                        .get("return_state")
+                        .or_else(|| entry.get("returnState"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                     title: entry.get("title")?.as_str()?.to_owned(),
                     authors: entry
                         .get("authors")
@@ -5867,6 +5899,25 @@ mod tests {
     }
 
     #[test]
+    fn a_returned_book_keeps_its_local_copy_without_offering_another_return() {
+        let mut app = AppRunner::new(PretNumerique {
+            view: View::Library,
+            books: vec![book("book-id", "montreal", Some("returned"))],
+            ..PretNumerique::default()
+        });
+        app.start();
+        let library = format!("{:?}", app.app().library_screen());
+        assert!(library.contains("Returned · local copy kept"), "{library}");
+        app.action(action_id("book.0"));
+        assert_eq!(app.app().view, View::Library);
+        assert!(app
+            .app()
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("local copy remains")));
+    }
+
+    #[test]
     fn job_parser_does_not_require_a_publication_url() {
         let job = parse_job(
             br#"{"id":"job-id","kind":"return","state":"returned","catalog":"banq","title":"Loan"}"#,
@@ -6122,6 +6173,34 @@ mod tests {
             .0;
         assert_eq!(return_url, format!("{API}/books/book-id/return"));
         assert_eq!(returning.app().view, View::Library);
+
+        let mut remote_returning = AppRunner::new(PretNumerique {
+            view: View::Library,
+            shelf: vec![ShelfEntry {
+                publication_handle: "remote-loan-handle".to_owned(),
+                return_job_id: None,
+                return_state: None,
+                title: "Loan without a local file".to_owned(),
+                authors: vec!["Author".to_owned()],
+                catalog: "montreal".to_owned(),
+                kind: "loan".to_owned(),
+                since: None,
+                until: Some("2026-09-01".to_owned()),
+                position: None,
+                total: None,
+            }],
+            ..PretNumerique::default()
+        });
+        remote_returning.start();
+        remote_returning.action(action_id("book.0"));
+        assert_eq!(remote_returning.app().view, View::ConfirmReturn);
+        let remote_return_url = posted(remote_returning.action(action_id(CONFIRM_RETURN)))
+            .expect("remote return should post to the proxy")
+            .0;
+        assert_eq!(
+            remote_return_url,
+            format!("{API}/shelf/remote-loan-handle/return")
+        );
     }
 
     #[test]
@@ -6631,6 +6710,9 @@ mod tests {
                 .collect(),
             shelf: (0..8)
                 .map(|index| ShelfEntry {
+                    publication_handle: format!("hold-{index}"),
+                    return_job_id: None,
+                    return_state: None,
                     title: format!("Mûre secrète et melon rafraîchissant {index}"),
                     authors: vec!["Sandra Verilli".to_owned()],
                     catalog: "montreal".to_owned(),
@@ -7208,6 +7290,9 @@ mod tests {
             ],
             shelf: vec![
                 ShelfEntry {
+                    publication_handle: "website-loan".to_owned(),
+                    return_job_id: None,
+                    return_state: None,
                     title: "Borrowed on the library website".to_owned(),
                     authors: Vec::new(),
                     catalog: "montreal".to_owned(),
@@ -7218,6 +7303,9 @@ mod tests {
                     total: None,
                 },
                 ShelfEntry {
+                    publication_handle: "hold-mure".to_owned(),
+                    return_job_id: None,
+                    return_state: None,
                     title: "Mûre secrète et melon rafraîchissant".to_owned(),
                     authors: vec!["Sandra Verilli".to_owned()],
                     catalog: "montreal".to_owned(),
@@ -7233,7 +7321,7 @@ mod tests {
         let drawn = format!("{:?}", app.library_screen());
         assert!(drawn.contains("Needs your attention"));
         assert!(drawn.contains("On hold"));
-        assert!(drawn.contains("not on your home server"));
+        assert!(drawn.contains("Borrowed on the library website"));
         for (name, metrics) in CONTENT_PANELS {
             let errors = app
                 .library_screen()
@@ -7807,9 +7895,9 @@ mod tests {
     #[test]
     fn the_shelf_carries_the_dates_and_the_place_in_the_queue() {
         let shelf = parse_shelf(
-            r#"[{"id":"a","title":"Les triplettes - Tome 1","authors":["Ariane Michaud"],"catalog":"montreal","kind":"loan","since":"2026-08-14T19:06:05.328Z","until":"2026-09-11T19:06:05.328Z"},
-                 {"id":"b","title":"Mûre secrète","authors":["Sandra Verilli"],"catalog":"montreal","kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7},
-                 {"id":"c","title":"Typiquement Eliza","authors":["Sophie Lee"],"catalog":"banq","kind":"hold","since":"2026-08-24T01:04:22.672Z","until":"2026-12-17T02:26:59.919Z","position":1,"total":4}]"#.as_bytes(),
+            r#"[{"id":"a","publication_handle":"loan-a","title":"Les triplettes - Tome 1","authors":["Ariane Michaud"],"catalog":"montreal","kind":"loan","since":"2026-08-14T19:06:05.328Z","until":"2026-09-11T19:06:05.328Z"},
+                 {"id":"b","publication_handle":"hold-b","title":"Mûre secrète","authors":["Sandra Verilli"],"catalog":"montreal","kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7},
+                 {"id":"c","publication_handle":"hold-c","title":"Typiquement Eliza","authors":["Sophie Lee"],"catalog":"banq","kind":"hold","since":"2026-08-24T01:04:22.672Z","until":"2026-12-17T02:26:59.919Z","position":1,"total":4}]"#.as_bytes(),
         )
         .expect("a readable shelf");
         assert_eq!(shelf.len(), 3);
@@ -7850,6 +7938,9 @@ mod tests {
         let app = PretNumerique {
             view: View::Library,
             shelf: vec![ShelfEntry {
+                publication_handle: "website-loan".to_owned(),
+                return_job_id: None,
+                return_state: None,
                 title: "Borrowed on the library website".to_owned(),
                 authors: Vec::new(),
                 catalog: "banq".to_owned(),
@@ -7861,9 +7952,10 @@ mod tests {
             }],
             ..PretNumerique::default()
         };
-        assert_eq!(app.unheld_loans(), 1);
+        assert_eq!(app.unheld_loans(), 0);
         let library = format!("{:?}", app.library_screen());
-        assert!(library.contains("one loan that is not on your home server"));
+        assert!(library.contains("Borrowed on the library website"));
+        assert!(!library.contains("not on your home server"));
     }
 
     #[test]
@@ -8129,6 +8221,9 @@ mod tests {
         let mut app = AppRunner::new(PretNumerique {
             view: View::Holds,
             shelf: vec![ShelfEntry {
+                publication_handle: "hold-mure".to_owned(),
+                return_job_id: None,
+                return_state: None,
                 title: "Mûre secrète".to_owned(),
                 authors: vec!["Sandra Verilli".to_owned()],
                 catalog: "montreal".to_owned(),
