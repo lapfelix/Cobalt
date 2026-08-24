@@ -108,8 +108,8 @@ struct Launcher {
     page: usize,
     /// The last entry handed the panel, if any.
     ///
-    /// Leaving an application no longer stops it -- the brief keeps fetching
-    /// and the terminal keeps its shell -- so the one the owner most recently
+    /// Leaving an application no longer stops it -- a borrow keeps going and
+    /// the terminal keeps its shell -- so the one the owner most recently
     /// opened is, as far as this launcher can honestly say, still running
     /// behind it. Marked on its tile rather than claimed in words, because the
     /// launcher has no telemetry to say more than "you left this open".

@@ -97,9 +97,9 @@ pub const UNINSTALL_FLAG: &str = ".adds/nm/uninstall";
 /// evidence of a NickelMenu the firmware has since removed.
 pub const VERSION_FILE: &str = ".kobo/version";
 
-/// The menu entry itself.
+/// The menu entries themselves.
 ///
-/// `cmd_spawn` starts `start.sh` in the background and returns, which is what
+/// `cmd_spawn` starts the script in the background and returns, which is what
 /// is wanted: `kobod` stops the reader and takes the panel, so a menu item
 /// that waited for it would wait for the whole session.
 ///
@@ -108,6 +108,11 @@ pub const VERSION_FILE: &str = ".kobo/version";
 /// reader on it, and would spend the safety net every other risky thing in
 /// this project has been leaning on, which is that restarting always comes
 /// back to stock.
+///
+/// Two entries, because presenting one application directly is a session with
+/// no launcher in it and an application cannot start another one. The second
+/// entry is the only route left to Settings, Terminal and Store, so it is not
+/// optional.
 #[must_use]
 pub fn config(install_folder: &str) -> String {
     format!(
@@ -115,7 +120,13 @@ pub fn config(install_folder: &str) -> String {
          #\n\
          # Starting Cobalt stops the reader and takes over the screen. Restart\n\
          # the device to get the reader back.\n\
-         menu_item :main :Cobalt :cmd_spawn :quiet:/mnt/onboard/{install_folder}/start.sh\n"
+         #\n\
+         # Cobalt opens the launcher, which holds Settings, Terminal and Store.\n\
+         # Prêt numérique opens that one application on its own; its bottom bar\n\
+         # carries the slot that gives the reader back.\n\
+         menu_item :main :Cobalt :cmd_spawn :quiet:/mnt/onboard/{install_folder}/start.sh\n\
+         menu_item :main :Prêt numérique :cmd_spawn \
+         :quiet:/mnt/onboard/{install_folder}/pret-numerique.sh\n"
     )
 }
 
@@ -505,6 +516,25 @@ mod tests {
         // cmd_output would block the reader's UI thread for as long as Cobalt
         // ran, which is the whole session.
         assert!(!text.contains("cmd_output"), "{text}");
+    }
+
+    #[test]
+    fn the_direct_entry_never_replaces_the_one_that_reaches_settings() {
+        // Presenting one application is a session with no launcher in it, and
+        // an application cannot start another, so dropping the launcher entry
+        // would orphan Settings, Terminal and Store.
+        let text = config(".adds/cobalt");
+        assert!(
+            text.contains(
+                "menu_item :main :Prêt numérique :cmd_spawn \
+                 :quiet:/mnt/onboard/.adds/cobalt/pret-numerique.sh"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("menu_item :main :Cobalt :cmd_spawn :quiet:"),
+            "{text}"
+        );
     }
 
     #[test]

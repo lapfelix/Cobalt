@@ -67,16 +67,3 @@ below covers. Their licences ship beside them.
 Both permit embedding and redistribution. The OFL forbids selling the font on
 its own and requires the reserved name to be kept, which embedding does not
 touch.
-
-## Services
-
-The example applications talk to services this project does not own.
-
-| Application | Service | Terms |
-| --- | --- | --- |
-| `hn` | Hacker News Firebase API | Public, unauthenticated, no key |
-| `gutenbird` | Gutendex and Project Gutenberg | Public; Gutenberg texts are public domain in the US |
-| `rss` | Feedsearch | Public; the search screen carries the attribution its terms ask for |
-
-None of them is paid for or rate-limit-exempt. An application that hammers
-them is your responsibility, not theirs.

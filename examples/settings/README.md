@@ -66,15 +66,5 @@ Built with the [Cobalt SDK](../../README.md), which
 [installs on a Kobo](../../README.md#install-it-on-your-kobo) with one
 command over USB. The other apps:
 [Launcher](../launcher/README.md) ·
-[Audiobook Studio](../audiobook/README.md) ·
-[Gutenbird](../gutenbird/README.md) ·
-[Hacker News](../hn/README.md) ·
-[RSS Reader](../rss/README.md) ·
-[Daily Brief](../brief/README.md) ·
-[AI Chat](../chat/README.md) ·
-[Coding Agents Sidekick](../sidekick/README.md) ·
 [Terminal](../terminal/README.md) ·
-[UI Components Showcase](../gallery/README.md) ·
-[Todo](../todo/README.md) ·
-[Tic-tac-toe](../tictactoe/README.md) ·
-[Magnet Sensor](../magnet/README.md)
+[Prêt numérique](../../apps/pret-numerique/README.md)

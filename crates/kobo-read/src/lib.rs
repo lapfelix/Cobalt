@@ -4649,10 +4649,7 @@ mod tests {
     #[test]
     fn an_action_that_is_not_the_readers_is_left_for_the_application() {
         let mut reader = reader(4);
-        assert_eq!(
-            reader.act("gutenbird-library", &panel()),
-            Outcome::Elsewhere
-        );
+        assert_eq!(reader.act("library-open", &panel()), Outcome::Elsewhere);
         assert_eq!(
             reader.act("reader-mark-notanumber", &panel()),
             Outcome::Elsewhere

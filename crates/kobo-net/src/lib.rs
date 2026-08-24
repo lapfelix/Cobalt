@@ -51,9 +51,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// the same failure. A host that will not answer at all is broken; a host that
 /// has taken the request and is working on it is not. A reasoning model
 /// answering a request for a four chapter script takes a measured hundred
-/// seconds to send its first byte, and at thirty seconds every audiobook this
-/// project generates failed as "the network was too slow to answer" -- which
-/// was the runtime giving up, not the network.
+/// seconds to send its first byte, and at thirty seconds every such request
+/// failed as "the network was too slow to answer" -- which was the runtime
+/// giving up, not the network.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The largest response header block accepted before the body is refused.
@@ -182,18 +182,6 @@ pub fn has_origin(url: &str, host: &str, port: u16) -> bool {
     parse(url).is_ok_and(|address| address.host.eq_ignore_ascii_case(host) && address.port == port)
 }
 
-/// The narration voices the audiobook application may spend its `ElevenLabs`
-/// key on: one per offered language, native accents. The application holds
-/// the same list in its pipeline; a voice added there must be added here.
-const AUDIOBOOK_VOICES: [&str; 6] = [
-    "JBFqnCBsd6RMkjVDRZzb", // George, English
-    "1qEiC6qsybMkmnNdVMbK", // Monika Sogam, Hindi
-    "l1zE9xgNpUTaQCZzpNJa", // Alberto Rodríguez, Spanish
-    "aQROLel5sQbj1vuIVi6B", // Nicolas, French
-    "7eVMgwCnXydb3CikjV7a", // Lea, German
-    "4VZIsMPtgggwNg7OXbPY", // James Gao, Chinese
-];
-
 /// Whether a shipped application may attach one named secret to this URL.
 ///
 /// The application selects a service, but the runtime independently binds the
@@ -203,61 +191,18 @@ const AUDIOBOOK_VOICES: [&str; 6] = [
 /// It lives here, beside [`has_origin`], because both the device runtime and
 /// the simulator have to apply the same answer. They did not: the simulator
 /// installed no policy at all, so every credentialed request was refused off
-/// the device, and the two applications that need a key could only be run on
+/// the device, and the application that needs a key could only be run on
 /// hardware. That is the one thing this project is arranged to avoid.
 #[must_use]
 pub fn credential_allowed(app: &str, credential: &Credential, url: &str) -> bool {
-    if app == "pret-numerique" {
-        return matches!(
-            (&*credential.secret, &credential.header),
-            ("pret-numerique-api", SecretHeader::Bearer)
-        ) && url.starts_with("https://home.lapal.me:3300/pret/v1/")
-            && has_origin(url, "home.lapal.me", 3300);
-    }
-    if app == "audiobook" {
-        return match (&*credential.secret, &credential.header) {
-            ("exa", SecretHeader::Named(header)) => {
-                header.eq_ignore_ascii_case("x-api-key")
-                    && url == "https://api.exa.ai/agent/runs"
-                    && has_origin(url, "api.exa.ai", 443)
-            }
-            ("openai", SecretHeader::Bearer) => {
-                url == "https://api.openai.com/v1/responses"
-                    && has_origin(url, "api.openai.com", 443)
-            }
-            ("elevenlabs", SecretHeader::Named(header)) => {
-                header.eq_ignore_ascii_case("xi-api-key")
-                    && AUDIOBOOK_VOICES.iter().any(|voice| {
-                        url == format!(
-                            "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_128"
-                        )
-                    })
-                    && has_origin(url, "api.elevenlabs.io", 443)
-            }
-            _ => false,
-        };
-    }
-    if app != "chat" {
+    if app != "pret-numerique" {
         return false;
     }
-    match (&*credential.secret, &credential.header) {
-        ("openai", SecretHeader::Bearer) => {
-            url == "https://api.openai.com/v1/chat/completions"
-                && has_origin(url, "api.openai.com", 443)
-        }
-        ("anthropic", SecretHeader::Named(header)) => {
-            header.eq_ignore_ascii_case("x-api-key")
-                && url == "https://api.anthropic.com/v1/messages"
-                && has_origin(url, "api.anthropic.com", 443)
-        }
-        ("gemini", SecretHeader::Named(header)) => {
-            header.eq_ignore_ascii_case("x-goog-api-key")
-                && url
-                    == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-                && has_origin(url, "generativelanguage.googleapis.com", 443)
-        }
-        _ => false,
-    }
+    matches!(
+        (&*credential.secret, &credential.header),
+        ("pret-numerique-api", SecretHeader::Bearer)
+    ) && url.starts_with("https://home.lapal.me:3300/pret/v1/")
+        && has_origin(url, "home.lapal.me", 3300)
 }
 
 /// What a server said, once the status line has been understood.
@@ -1195,28 +1140,6 @@ mod tests {
     /// it live beside it rather than in whichever runtime happened to own it
     /// first. In the device runtime they only ran under a feature flag.
     #[test]
-    fn chat_credentials_are_bound_to_their_exact_service() {
-        use kobo_protocol::Credential;
-
-        let openai = Credential::bearer("openai");
-        assert!(super::credential_allowed(
-            "chat",
-            &openai,
-            "https://api.openai.com/v1/chat/completions"
-        ));
-        for (app, url) in [
-            ("other", "https://api.openai.com/v1/chat/completions"),
-            (
-                "chat",
-                "https://api.openai.com.attacker.invalid/v1/chat/completions",
-            ),
-            ("chat", "https://attacker.invalid/collect"),
-        ] {
-            assert!(!super::credential_allowed(app, &openai, url));
-        }
-    }
-
-    #[test]
     fn pret_numerique_credentials_are_bound_to_the_proxy_origin() {
         use kobo_protocol::Credential;
 
@@ -1254,49 +1177,6 @@ mod tests {
             ),
         ] {
             assert!(!super::credential_allowed(app, &credential, url));
-        }
-    }
-
-    #[test]
-    fn audiobook_credentials_are_bound_to_exact_provider_requests() {
-        use kobo_protocol::Credential;
-
-        let requests = [
-            (
-                Credential::in_header("exa", "x-api-key"),
-                "https://api.exa.ai/agent/runs".to_owned(),
-            ),
-            (
-                Credential::bearer("openai"),
-                "https://api.openai.com/v1/responses".to_owned(),
-            ),
-        ];
-        let voices = super::AUDIOBOOK_VOICES.map(|voice| {
-            (
-                Credential::in_header("elevenlabs", "xi-api-key"),
-                format!(
-                    "https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=mp3_44100_128"
-                ),
-            )
-        });
-        for (credential, url) in requests.into_iter().chain(voices) {
-            assert!(super::credential_allowed("audiobook", &credential, &url));
-            assert!(!super::credential_allowed("chat", &credential, &url));
-            assert!(!super::credential_allowed(
-                "audiobook",
-                &credential,
-                "https://attacker.invalid/collect"
-            ));
-        }
-        // A different voice, a different format, or a path dressed up as a
-        // query must all be refused: the key is bound to these narrators.
-        let elevenlabs = Credential::in_header("elevenlabs", "xi-api-key");
-        for url in [
-            "https://api.elevenlabs.io/v1/text-to-speech/AAAAAAAAAAAAAAAAAAAA?output_format=mp3_44100_128",
-            "https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb?output_format=mp3_22050_32",
-            "https://api.elevenlabs.io.attacker.invalid/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb?output_format=mp3_44100_128",
-        ] {
-            assert!(!super::credential_allowed("audiobook", &elevenlabs, url));
         }
     }
 

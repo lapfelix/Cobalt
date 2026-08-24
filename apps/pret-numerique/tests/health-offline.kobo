@@ -1,4 +1,5 @@
 # The simulator's offline scenario exercises the proxy health error path.
+# Nothing here touches a borrow or a return.
 clean
 scenario offline
 tap Settings

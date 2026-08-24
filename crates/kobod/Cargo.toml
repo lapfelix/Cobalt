@@ -22,6 +22,12 @@ kobo-protocol = { path = "../kobo-protocol" }
 kobo-text = { path = "../kobo-text" }
 kobo-ui = { path = "../kobo-ui" }
 
+[dev-dependencies]
+# The runtime tells a keyboard apart from any other grid of cells by its shape.
+# Testing that against a hand-built imitation only proves the imitation, so the
+# tests build the real composite the SDK draws.
+kobo-sdk = { path = "../kobo-sdk" }
+
 [lints]
 workspace = true
 

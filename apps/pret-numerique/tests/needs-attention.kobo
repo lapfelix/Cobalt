@@ -1,8 +1,29 @@
-# Fixture-backed queue states. The proxy fixture should expose one
-# auth_required job and one hook_failed job in the saved job list.
+# The three homes an exception can have. The fixture holds Montréal signed
+# out, one loan whose delivery failed, and one borrow the library never
+# confirmed.
 clean
-scenario normal
-tap Queue
-wait-for Your requests
-expect Sign-in needed
-expect Could not send
+tap Settings
+wait-for Connection
+wait-for Sign-in needed
+expect --auth montreal
+tap Library
+wait-for My loans
+wait-for Needs your attention
+expect Uncertain fixture title
+expect Check your library account
+expect Fixture unsent title
+expect Not sent to your reader
+expect Return not confirmed
+clean
+tap Fixture unsent title
+wait-for Needs you
+expect both safe on your home
+expect status 1
+expect Send to my reader again
+clean
+tap Send to my reader again
+wait-for My loans
+clean
+wait-for Sent to your reader
+expect-missing Not sent to your reader
+clean

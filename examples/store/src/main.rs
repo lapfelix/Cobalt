@@ -510,28 +510,28 @@ mod tests {
         let mut runner = AppRunner::new(Store::default());
         runner.start();
         runner.device_result(DeviceResult::Apps {
-            entries: vec![app("sudoku", None)],
+            entries: vec![app("notes", None)],
         });
         runner.device_result(DeviceResult::Apps {
-            entries: vec![app("sudoku", None)],
+            entries: vec![app("notes", None)],
         });
-        runner.action(action_id(&app_action("sudoku")));
-        runner.action(action_id(&install_action("sudoku")));
+        runner.action(action_id(&app_action("notes")));
+        runner.action(action_id(&install_action("notes")));
         runner.device_result(DeviceResult::Done);
         assert_eq!(
             runner.app().notice.as_deref(),
-            Some("sudoku app installed successfully.")
+            Some("notes app installed successfully.")
         );
 
         runner.device_result(DeviceResult::Apps {
-            entries: vec![app("sudoku", Some("1.1.0"))],
+            entries: vec![app("notes", Some("1.1.0"))],
         });
-        runner.action(action_id(&app_action("sudoku")));
-        runner.action(action_id(&remove_action("sudoku")));
+        runner.action(action_id(&app_action("notes")));
+        runner.action(action_id(&remove_action("notes")));
         runner.device_result(DeviceResult::Done);
         assert_eq!(
             runner.app().notice.as_deref(),
-            Some("sudoku app removed successfully.")
+            Some("notes app removed successfully.")
         );
     }
 
@@ -540,17 +540,17 @@ mod tests {
         let mut runner = AppRunner::new(Store::default());
         runner.start();
         runner.device_result(DeviceResult::Apps {
-            entries: vec![app("sudoku", Some("1.0.0"))],
+            entries: vec![app("notes", Some("1.0.0"))],
         });
         runner.device_result(DeviceResult::Apps {
-            entries: vec![app("sudoku", Some("1.0.0"))],
+            entries: vec![app("notes", Some("1.0.0"))],
         });
-        runner.action(action_id(&app_action("sudoku")));
-        runner.action(action_id(&install_action("sudoku")));
+        runner.action(action_id(&app_action("notes")));
+        runner.action(action_id(&install_action("notes")));
         runner.device_result(DeviceResult::Done);
         assert_eq!(
             runner.app().notice.as_deref(),
-            Some("sudoku app updated successfully.")
+            Some("notes app updated successfully.")
         );
     }
 

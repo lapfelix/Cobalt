@@ -228,7 +228,6 @@ footer nav { display: flex; gap: 20px; flex-wrap: wrap; }
       <div class="cta">
         <a class="btn primary" href="#quick-start">Quick start</a>
         <a class="btn" href="https://github.com/BandarLabs/Cobalt/blob/main/SDK.md">Detailed guide</a>
-        <a class="btn" href="https://github.com/BandarLabs/Cobalt/tree/main/examples/gallery">Component gallery</a>
       </div>
     </div>
     <section id="quick-start">
@@ -313,7 +312,6 @@ footer nav { display: flex; gap: 20px; flex-wrap: wrap; }
       </div>
       <div class="links">
         <a href="https://github.com/BandarLabs/Cobalt/blob/main/SDK.md#3-ui-component-reference">Method-by-method UI reference</a>
-        <a href="https://github.com/BandarLabs/Cobalt/tree/main/examples/gallery">Rendered component gallery</a>
       </div>
     </section>
 
@@ -384,15 +382,15 @@ footer nav { display: flex; gap: 20px; flex-wrap: wrap; }
           <thead><tr><th>Crate</th><th>Use it when</th><th>Reference app</th></tr></thead>
           <tbody>
             <tr><td><code>kobo-sdk</code></td><td>Every app: lifecycle, UI, tasks, storage and runtime services.</td><td>All examples and apps</td></tr>
-            <tr><td><code>kobo-ui</code></td><td>You need advanced public UI types, pagination helpers or renderer-level layout assertions. Most component types are re-exported by <code>kobo-sdk</code>.</td><td>Gallery, Sudoku tests</td></tr>
-            <tr><td><code>kobo-image</code></td><td>Decode bounded JPEG/PNG bytes, fit/crop them and dither to panel greys before <code>put_picture</code>.</td><td>Gallery, readers</td></tr>
-            <tr><td><code>kobo-json</code></td><td>Parse untrusted JSON or build request objects without Serde.</td><td>Brief, Chat, RSS</td></tr>
-            <tr><td><code>kobo-html</code></td><td>Turn untrusted HTML fragments into bounded text, or rasterise mathematical formulae with its optional feature.</td><td>Hacker News, RSS, arXiv</td></tr>
-            <tr><td><code>kobo-xml</code></td><td>Scan bounded XML/Atom/RSS input without external entities or recursive allocation.</td><td>RSS, arXiv</td></tr>
-            <tr><td><code>kobo-opds</code></td><td>Read OPDS 1.2 Atom and OPDS 2.0 JSON catalogues into one model.</td><td>Store/catalog clients</td></tr>
-            <tr><td><code>kobo-doc</code></td><td>Sniff and parse EPUB, HTML, Markdown or plain-text bytes into structured document blocks.</td><td>arXiv, book readers</td></tr>
-            <tr><td><code>kobo-read</code></td><td>Paginate a structured document and manage stable locations, contents, search and annotations.</td><td>arXiv</td></tr>
-            <tr><td><code>kobo-bookview</code></td><td>You need an end-to-end reading surface with deferred image loading and stable repagination.</td><td>arXiv</td></tr>
+            <tr><td><code>kobo-ui</code></td><td>You need advanced public UI types, pagination helpers or renderer-level layout assertions. Most component types are re-exported by <code>kobo-sdk</code>.</td><td>Launcher, Store, Prêt numérique</td></tr>
+            <tr><td><code>kobo-image</code></td><td>Decode bounded JPEG/PNG bytes, fit/crop them and dither to panel greys before <code>put_picture</code>.</td><td>—</td></tr>
+            <tr><td><code>kobo-json</code></td><td>Parse untrusted JSON or build request objects without Serde.</td><td>Settings, Prêt numérique</td></tr>
+            <tr><td><code>kobo-html</code></td><td>Turn untrusted HTML fragments into bounded text, or rasterise mathematical formulae with its optional feature.</td><td>—</td></tr>
+            <tr><td><code>kobo-xml</code></td><td>Scan bounded XML/Atom/RSS input without external entities or recursive allocation.</td><td>—</td></tr>
+            <tr><td><code>kobo-opds</code></td><td>Read OPDS 1.2 Atom and OPDS 2.0 JSON catalogues into one model.</td><td>—</td></tr>
+            <tr><td><code>kobo-doc</code></td><td>Sniff and parse EPUB, HTML, Markdown or plain-text bytes into structured document blocks.</td><td>—</td></tr>
+            <tr><td><code>kobo-read</code></td><td>Paginate a structured document and manage stable locations, contents, search and annotations.</td><td>—</td></tr>
+            <tr><td><code>kobo-bookview</code></td><td>You need an end-to-end reading surface with deferred image loading and stable repagination.</td><td>—</td></tr>
             <tr><td><code>kobo-term</code></td><td>Turn VT100 output bytes into rows and a cursor for <code>ScreenBuilder::terminal</code>.</td><td>Terminal</td></tr>
           </tbody>
         </table>

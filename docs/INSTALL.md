@@ -74,7 +74,7 @@ cargo run -p kobo-cli -- setup
 That one command builds every device-side program, finds the mounted reader,
 copies Cobalt into `.adds/cobalt`, reads every file back to prove it arrived
 intact, sets the reader's own `ForceWifiOn` and `AutoSleepMinutes` settings,
-stages the **Cobalt** menu entry, and ejects. It builds before it writes
+stages the **Cobalt** and **Prêt numérique** menu entries, and ejects. It builds before it writes
 anything, so a build that fails leaves the reader untouched. It leaves the
 firmware's root SSH server disabled.
 
@@ -100,16 +100,39 @@ you with an unbootable reader.
 
 ## 5. Open Cobalt
 
-On this firmware the entry is in the menu at the **bottom right** of the home
+On this firmware the entries are in the menu at the **bottom right** of the home
 screen. (NickelMenu puts its items in the top-left menu on old firmware and in
 the bottom-right one from 4.23.15505 onward, and the Clara BW is well past
-that.) Tap it and choose **Cobalt**.
+that.) There are two:
 
-The launcher appears with Cobalt's built-in applications. Store-only
-applications are deliberately absent until they are installed over Wi-Fi.
+- **Cobalt** opens the launcher, with Cobalt's built-in applications. Store-only
+  applications are deliberately absent until they are installed over Wi-Fi.
+  To leave, use **Return to Kobo reader** at the bottom of the launcher.
+- **Prêt numérique** opens that one application on its own, with no launcher
+  behind it. To leave, use **Kobo reader** in its bottom bar.
 
-To leave, use **Return to Kobo reader** at the bottom of the launcher. The
-stock reader comes back. So does a reboot, always, from anywhere.
+The stock reader comes back either way. So does a reboot, always, from anywhere.
+
+Both entries, not one. An application cannot start another one, so a session
+that opens Prêt numérique directly has no route to **Settings**, **Terminal** or
+**App Store** — the **Cobalt** entry is the only one there is. Removing it would
+strand them.
+
+### The exact menu lines
+
+`kobo setup` writes these into `.adds/nm/cobalt`, and they are what should be in
+that file if you edit it by hand:
+
+```
+menu_item :main :Cobalt :cmd_spawn :quiet:/mnt/onboard/.adds/cobalt/start.sh
+menu_item :main :Prêt numérique :cmd_spawn :quiet:/mnt/onboard/.adds/cobalt/pret-numerique.sh
+```
+
+`start.sh` presents whatever its first argument names and defaults to the
+launcher, so a bare invocation is exactly what it always was.
+`pret-numerique.sh` is one line: `start.sh kobo-pret-numerique`. Both survive a
+`kobo deploy`, because both are built by `kobo package` rather than written on
+the device.
 
 ## Installing apps after setup
 
@@ -118,11 +141,6 @@ catalog saved on the reader, then checks Cobalt's fixed app release channel
 over Wi-Fi.
 Each app can be installed, updated or removed independently. Installed apps
 appear in the launcher without rebooting.
-
-For the `0.2.0` release, **Sudoku** is the end-to-end Store test: it is not in
-the USB package. Seeing it in Store, installing it, and then seeing it appear
-in the launcher proves that catalog refresh, package verification, installation
-and launcher rediscovery all worked.
 
 The Store never replaces Cobalt itself. Full platform updates remain in
 **Settings**, use a separate request and preserve installed apps and the

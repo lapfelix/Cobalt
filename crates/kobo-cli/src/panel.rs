@@ -146,9 +146,9 @@ pub fn parse_present(arguments: &[String]) -> Result<Present, String> {
 
 /// Accepts either the packaged name or the short one a developer thinks in.
 ///
-/// `kobo present todo` and `kobo present kobo-todo` are the same reader and
-/// the same screen, and having to remember which one the CLI wants is the
-/// sort of friction that gets a shell alias written instead.
+/// `kobo present settings` and `kobo present kobo-settings` are the same
+/// reader and the same screen, and having to remember which one the CLI wants
+/// is the sort of friction that gets a shell alias written instead.
 fn resolve_app(name: &str) -> Result<String, String> {
     let prefixed = format!("kobo-{name}");
     for packaged in presentable() {
@@ -422,21 +422,8 @@ mod tests {
 
     #[test]
     fn an_application_is_named_either_way_round() {
-        assert_eq!(resolve_app("todo").unwrap(), "kobo-todo");
-        assert_eq!(resolve_app("kobo-todo").unwrap(), "kobo-todo");
-    }
-
-    #[test]
-    fn an_application_that_only_store_delivers_can_still_be_presented() {
-        // arXiv and Sudoku are not in the USB platform package, so the list
-        // of built-in applications does not have them. They install to the
-        // same directory and start the same way as everything else, and they
-        // are the newest work on the reader, so refusing to present them
-        // withheld the panel from exactly the applications that needed it.
-        assert_eq!(super::resolve_app("arxiv").unwrap(), "kobo-arxiv");
-        assert_eq!(super::resolve_app("kobo-sudoku").unwrap(), "kobo-sudoku");
-        let listed = super::installed_list();
-        assert!(listed.contains("arxiv"), "{listed}");
+        assert_eq!(resolve_app("settings").unwrap(), "kobo-settings");
+        assert_eq!(resolve_app("kobo-settings").unwrap(), "kobo-settings");
     }
 
     #[test]
@@ -459,29 +446,29 @@ mod tests {
     fn an_unknown_application_is_answered_with_the_list_of_real_ones() {
         let error = resolve_app("kobo-spreadsheet").unwrap_err();
         assert!(error.contains("not an installed application"), "{error}");
-        assert!(error.contains("todo"), "{error}");
+        assert!(error.contains("settings"), "{error}");
     }
 
     #[test]
     fn a_session_has_a_length_even_when_none_is_asked_for() {
-        let parsed = parse_present(&arguments(&["todo", "--device", "192.168.1.5"])).unwrap();
+        let parsed = parse_present(&arguments(&["settings", "--device", "192.168.1.5"])).unwrap();
         assert_eq!(parsed.seconds, DEFAULT_SECONDS);
-        assert_eq!(parsed.app, "kobo-todo");
+        assert_eq!(parsed.app, "kobo-settings");
         assert_eq!(parsed.host, "192.168.1.5");
         assert!(!parsed.keep_running);
     }
 
     #[test]
     fn the_application_may_come_after_the_device() {
-        let parsed = parse_present(&arguments(&["--device", "192.168.1.5", "hn"])).unwrap();
-        assert_eq!(parsed.app, "kobo-hn");
+        let parsed = parse_present(&arguments(&["--device", "192.168.1.5", "store"])).unwrap();
+        assert_eq!(parsed.app, "kobo-store");
     }
 
     #[test]
     fn a_session_longer_than_the_ceiling_is_refused() {
         let over = (MAXIMUM_SECONDS + 1).to_string();
         let error = parse_present(&arguments(&[
-            "todo",
+            "settings",
             "-s",
             "192.168.1.5",
             "--seconds",
@@ -493,14 +480,20 @@ mod tests {
 
     #[test]
     fn a_session_of_no_length_is_refused_rather_than_started() {
-        let error = parse_present(&arguments(&["todo", "-s", "192.168.1.5", "--seconds", "0"]))
-            .unwrap_err();
+        let error = parse_present(&arguments(&[
+            "settings",
+            "-s",
+            "192.168.1.5",
+            "--seconds",
+            "0",
+        ]))
+        .unwrap_err();
         assert!(error.contains("at once"), "{error}");
     }
 
     #[test]
     fn a_present_without_a_device_says_so() {
-        let error = parse_present(&arguments(&["todo"])).unwrap_err();
+        let error = parse_present(&arguments(&["settings"])).unwrap_err();
         assert!(error.contains("needs a device"), "{error}");
     }
 
@@ -521,7 +514,7 @@ mod tests {
         for message in [
             "Host key verification failed.",
             "Permission denied (publickey).",
-            "not installed: /mnt/onboard/.adds/cobalt/bin/kobo-todo",
+            "not installed: /mnt/onboard/.adds/cobalt/bin/kobo-settings",
             "the session did not start",
         ] {
             assert!(!super::is_unreachable(message), "{message}");
@@ -531,7 +524,7 @@ mod tests {
     #[test]
     fn an_unusable_host_is_refused_before_anything_is_run() {
         let error =
-            parse_present(&arguments(&["todo", "-s", "192.168.1.5; rm -rf /"])).unwrap_err();
+            parse_present(&arguments(&["settings", "-s", "192.168.1.5; rm -rf /"])).unwrap_err();
         assert!(error.contains("not a usable device host"), "{error}");
     }
 }

@@ -25,7 +25,12 @@ mod panel;
 mod setup;
 mod sha256;
 
-const DEVICE_PACKAGES: &[&str] = &["kobo-doctor", "kobod", "kobo-todo", "kobo-terminal"];
+const DEVICE_PACKAGES: &[&str] = &[
+    "kobo-doctor",
+    "kobod",
+    "kobo-pret-numerique",
+    "kobo-terminal",
+];
 /// Everything an owner's device needs, in the order it is packaged, with the
 /// features each one has to be built with.
 ///
@@ -42,40 +47,17 @@ const DEVICE_PACKAGES: &[&str] = &["kobo-doctor", "kobod", "kobo-todo", "kobo-te
 const INSTALLED_PACKAGES: &[(&str, Option<&str>)] = &[
     ("kobod", Some("device-write")),
     ("kobo-launcher", None),
-    ("kobo-audiobook", None),
     ("kobo-terminal", None),
-    ("kobo-todo", None),
-    ("kobo-brief", None),
-    ("kobo-chat", None),
-    ("kobo-gutenbird", None),
-    ("kobo-gallery", None),
-    ("kobo-tictactoe", None),
-    ("kobo-magnet", None),
-    ("kobo-hn", None),
-    ("kobo-rss", None),
     ("kobo-settings", None),
-    ("kobo-sidekick", None),
     ("kobo-store", None),
     ("kobo-pret-numerique", None),
 ];
-/// Applications released through Store, including the initial built-in copies
-/// that users can update, remove and reinstall independently of Cobalt.
-const STORE_PACKAGES: &[&str] = &[
-    "kobo-arxiv",
-    "kobo-audiobook",
-    "kobo-brief",
-    "kobo-chat",
-    "kobo-gallery",
-    "kobo-gutenbird",
-    "kobo-hn",
-    "kobo-magnet",
-    "kobo-morse",
-    "kobo-rss",
-    "kobo-sidekick",
-    "kobo-sudoku",
-    "kobo-tictactoe",
-    "kobo-todo",
-];
+/// Applications released through Store.
+///
+/// Empty: nothing in this workspace is published to the public catalog.
+/// `kobo-pret-numerique` is deliberately not here -- it ships inside the
+/// platform package and is never offered for download.
+const STORE_PACKAGES: &[&str] = &[];
 /// Proof that the daemon in the package can actually take the panel. The
 /// phrase only exists inside `present_on_panel`, which is behind
 /// `device-write`, so finding it in the finished binary is the artifact-level
@@ -87,6 +69,10 @@ const PRESENT_UNLOCK_PHRASE: &[u8] = b"OWNER_ATTENDED_PANEL_SESSION";
 /// owner tapping a menu entry *is* the attendance that gate was asking for.
 /// The session hands the panel back on every exit path, and a reboot always
 /// lands in the stock reader, so the worst case remains a power cycle.
+///
+/// The application to present is the first argument and defaults to the
+/// launcher, so a bare invocation -- what the menu entry and every instruction
+/// in this project use -- is unchanged.
 const START_SCRIPT: &str = "\
 #!/bin/sh
 # Starts Cobalt. The stock reader is stopped, the panel is handed over, and the
@@ -94,6 +80,7 @@ const START_SCRIPT: &str = "\
 # stock reader, so nothing here needs undoing by hand.
 set -e
 root=/mnt/onboard/.adds/cobalt
+app=${1:-kobo-launcher}
 # `kobo setup --enable-ssh` leaves only a public key here. The reader's
 # root-owned menu action can finish the step a USB volume cannot.
 staged_key=\"$root/bootstrap/authorized_key\"
@@ -117,8 +104,30 @@ if [ -s \"$staged_key\" ]; then
   rm -f \"$staged_key\"
   sync
 fi
+# Checked after the key, so a mistyped name never costs the owner that step.
+if [ ! -x \"$root/bin/$app\" ]; then
+  echo \"$root/bin/$app is not there\" > /mnt/onboard/kobod.txt
+  exit 1
+fi
 KOBO_PRESENT_UNLOCK=OWNER_ATTENDED_PANEL_SESSION \\
-  exec \"$root/bin/kobod\" --present \"$root/bin/kobo-launcher\" > /mnt/onboard/kobod.txt 2>&1
+  exec \"$root/bin/kobod\" --present \"$root/bin/$app\" > /mnt/onboard/kobod.txt 2>&1
+";
+
+/// A second menu entry that opens one application instead of the launcher.
+///
+/// A file of its own rather than an argument in the NickelMenu config: every
+/// entry this project has shipped invokes a bare path, and that is the form the
+/// install documentation and the reader's existing config both use. The
+/// argument stays available to anyone at a shell.
+///
+/// The launcher entry has to stay alongside it. An application cannot start
+/// another one, so presenting this one directly is the whole of what the
+/// session offers, and Settings, Terminal and Store live in the launcher.
+const PRET_NUMERIQUE_SCRIPT: &str = "\
+#!/bin/sh
+# Starts Cobalt with Prêt numérique on the panel instead of the launcher. Use
+# start.sh for the launcher, which is where Settings, Terminal and Store are.
+exec /mnt/onboard/.adds/cobalt/start.sh kobo-pret-numerique
 ";
 
 /// Kept in the source tree for the install documentation and package tests.
@@ -137,10 +146,15 @@ To remove it completely: delete this folder. Nothing was written to the
 system partition, no start-up script was added, and no part of the reader was
 replaced, so there is nothing else to undo.
 
-To start it: run start.sh. If you have NickelMenu installed, add this one line
-to .adds/nm/menu to get an entry in the reader's own menu:
+To start it: run start.sh. If you have NickelMenu installed, add these lines
+to .adds/nm/menu to get entries in the reader's own menu:
 
   menu_item :main    :Cobalt    :cmd_spawn    :quiet:/mnt/onboard/.adds/cobalt/start.sh
+  menu_item :main    :Prêt numérique    :cmd_spawn    :quiet:/mnt/onboard/.adds/cobalt/pret-numerique.sh
+
+The first opens the launcher, which is where Settings, Terminal and Store are.
+The second opens Prêt numérique on its own; its bottom bar has a Kobo reader
+slot that ends the session.
 
 Starting Cobalt stops the stock reader for the length of the session and
 starts it again afterwards. That takes twenty to thirty seconds each way. A
@@ -2948,6 +2962,11 @@ fn build_package_bytes() -> Result<BuiltPackage, String> {
         });
     }
     members.push(text_member("start.sh", START_SCRIPT, true));
+    members.push(text_member(
+        "pret-numerique.sh",
+        PRET_NUMERIQUE_SCRIPT,
+        true,
+    ));
     // Do not add README/LICENSE/VERSION files here. The source repository
     // remains fully licensed, while the reader only needs executable runtime
     // files and this launcher script.
@@ -3854,7 +3873,7 @@ fn run_simulation(arguments: &[String]) -> Result<(), String> {
 /// minutes later. `kobod` is on that list and is not an application: it is the
 /// runtime the simulation is already starting.
 fn simulated_package(arguments: &[String]) -> Result<&'static str, String> {
-    let mut wanted = "todo";
+    let mut wanted = "launcher";
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -3872,8 +3891,9 @@ fn simulated_package(arguments: &[String]) -> Result<&'static str, String> {
         }
         index += 1;
     }
-    // Both spellings work, because the launcher calls it 'rss' and cargo calls
-    // it 'kobo-rss', and somebody reading either should not have to know.
+    // Both spellings work, because the launcher calls it 'settings' and cargo
+    // calls it 'kobo-settings', and somebody reading either should not have to
+    // know.
     INSTALLED_PACKAGES
         .iter()
         .map(|(package, _)| *package)
@@ -5175,7 +5195,7 @@ fn parse_trust(arguments: &[String]) -> Result<(SecretAction, SecretTarget), Str
 
 /// Where a trust root is looked for when `--from` is not given: the host
 /// trust directory every host runtime already reads, which is where
-/// `kobo-sidekick init` writes its certificate.
+/// `kobo-sidekickd init` writes its certificate.
 fn trust_source(name: &str) -> Result<PathBuf, String> {
     let Some(home) = std::env::var_os("HOME") else {
         return Err(format!(
@@ -5889,7 +5909,37 @@ mod tests {
     #[test]
     fn the_start_script_points_at_the_folder_the_package_writes() {
         assert!(super::START_SCRIPT.contains(&format!("/{}", package::INSTALL_ROOT)));
+        assert!(super::PRET_NUMERIQUE_SCRIPT.contains(&format!("/{}", package::INSTALL_ROOT)));
         assert!(super::INSTALL_README.contains(&format!("/{}", package::INSTALL_ROOT)));
+    }
+
+    /// The menu entry and every instruction in this project run `start.sh` with
+    /// no arguments, so the default is the whole of that contract.
+    #[test]
+    fn a_bare_start_presents_the_launcher_and_an_argument_presents_one_app() {
+        let script = super::START_SCRIPT;
+        assert!(script.contains("app=${1:-kobo-launcher}"), "{script}");
+        assert!(
+            script.contains(
+                "KOBO_PRESENT_UNLOCK=OWNER_ATTENDED_PANEL_SESSION \\\n  \
+                 exec \"$root/bin/kobod\" --present \"$root/bin/$app\" \
+                 > /mnt/onboard/kobod.txt 2>&1"
+            ),
+            "{script}"
+        );
+        let direct = super::PRET_NUMERIQUE_SCRIPT;
+        assert!(
+            direct.contains("exec /mnt/onboard/.adds/cobalt/start.sh kobo-pret-numerique"),
+            "{direct}"
+        );
+        // The unlock is set in one place. A second script that set it itself
+        // would be a second place to get the gate wrong.
+        let unlock =
+            std::str::from_utf8(super::PRESENT_UNLOCK_PHRASE).expect("the unlock is ASCII");
+        assert!(!direct.contains(unlock), "{direct}");
+        assert!(super::INSTALLED_PACKAGES
+            .iter()
+            .any(|(name, _)| *name == "kobo-pret-numerique"));
     }
 
     #[test]
@@ -6003,7 +6053,12 @@ mod tests {
     fn default_device_build_excludes_guard_and_smoke() {
         assert_eq!(
             DEVICE_PACKAGES,
-            ["kobo-doctor", "kobod", "kobo-todo", "kobo-terminal"]
+            [
+                "kobo-doctor",
+                "kobod",
+                "kobo-pret-numerique",
+                "kobo-terminal"
+            ]
         );
         assert!(!DEVICE_PACKAGES.contains(&"kobo-guard"));
         assert!(!DEVICE_PACKAGES.contains(&"kobo-smoke"));
@@ -6480,30 +6535,30 @@ mod tests {
 
         #[test]
         fn without_an_app_it_runs_the_one_it_always_ran() {
-            assert_eq!(simulated_package(&arguments(&[])), Ok("kobo-todo"));
+            assert_eq!(simulated_package(&arguments(&[])), Ok("kobo-launcher"));
         }
 
         #[test]
         fn an_app_can_be_named_the_way_the_launcher_names_it() {
             assert_eq!(
-                simulated_package(&arguments(&["--app", "rss"])),
-                Ok("kobo-rss")
+                simulated_package(&arguments(&["--app", "settings"])),
+                Ok("kobo-settings")
             );
             assert_eq!(
-                simulated_package(&arguments(&["-a", "gutenbird"])),
-                Ok("kobo-gutenbird")
+                simulated_package(&arguments(&["-a", "pret-numerique"])),
+                Ok("kobo-pret-numerique")
             );
             assert_eq!(
-                simulated_package(&arguments(&["--app", "sudoku"])),
-                Ok("kobo-sudoku")
+                simulated_package(&arguments(&["--app", "terminal"])),
+                Ok("kobo-terminal")
             );
         }
 
         #[test]
         fn an_app_can_also_be_named_the_way_cargo_names_it() {
             assert_eq!(
-                simulated_package(&arguments(&["--app", "kobo-hn"])),
-                Ok("kobo-hn")
+                simulated_package(&arguments(&["--app", "kobo-store"])),
+                Ok("kobo-store")
             );
         }
 
@@ -6518,23 +6573,29 @@ mod tests {
         fn a_name_that_is_not_an_app_is_refused_with_the_ones_that_are() {
             let error =
                 simulated_package(&arguments(&["--app", "../../etc/passwd"])).expect_err("refused");
-            assert!(error.contains("rss"), "{error}");
-            assert!(error.contains("todo"), "{error}");
+            assert!(error.contains("settings"), "{error}");
+            assert!(error.contains("pret-numerique"), "{error}");
             let missing = simulated_package(&arguments(&["--app"])).expect_err("refused");
             assert!(missing.contains("needs a name"), "{missing}");
         }
 
         mod app_registry {
-            use super::super::super::{read_release_registry, workspace_manifest, STORE_PACKAGES};
+            use super::super::super::{
+                app_list, read_release_registry, workspace_manifest, STORE_PACKAGES,
+            };
             use std::collections::BTreeSet;
+            use std::path::PathBuf;
+
+            fn registry() -> PathBuf {
+                workspace_manifest()
+                    .parent()
+                    .expect("workspace root")
+                    .join("apps/catalog.json")
+            }
 
             #[test]
             fn checked_in_registry_contains_every_store_application() {
-                let registry = workspace_manifest()
-                    .parent()
-                    .expect("workspace root")
-                    .join("apps/catalog.json");
-                let apps = read_release_registry(&registry).expect("registry");
+                let apps = read_release_registry(&registry()).expect("registry");
                 let registered = apps
                     .iter()
                     .map(|app| app.package.as_str())
@@ -6543,11 +6604,16 @@ mod tests {
                     registered,
                     STORE_PACKAGES.iter().copied().collect::<BTreeSet<_>>()
                 );
-                let sudoku = apps
-                    .iter()
-                    .find(|app| app.id == "sudoku")
-                    .expect("Sudoku registry entry");
-                assert_eq!(sudoku.version, "1.0.1");
+            }
+
+            /// A registry with no applications in it is still a valid registry,
+            /// and the commands that read one have to say so rather than fall
+            /// over: the file is parsed on every CI run.
+            #[test]
+            fn a_registry_with_nothing_to_release_is_reported_not_a_panic() {
+                let error = app_list(&["--registry".to_owned(), registry().display().to_string()])
+                    .expect_err("an empty registry has nothing to list");
+                assert!(error.contains("empty"), "{error}");
             }
         }
     }

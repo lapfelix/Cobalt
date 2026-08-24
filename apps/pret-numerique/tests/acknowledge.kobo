@@ -1,0 +1,29 @@
+# Acknowledging is the only way past a borrow or return the proxy refuses to
+# guess about, so both paths are driven end to end: the borrow that has no loan
+# to sit against, then the return that has one.
+clean
+tap Library
+wait-for My loans
+wait-for Needs your attention
+tap Uncertain fixture title
+wait-for Needs you
+expect cannot tell whether Montréal gave you this
+expect it borrows nothing and
+expect stopped answering
+expect I checked my account
+clean
+tap I checked my account
+wait-for Cleared
+# The loans and the unresolved list are read again after the acknowledgement,
+# so the row goes on the answer to that read, not on this tap.
+wait 2000
+expect-missing Uncertain fixture title
+tap Fixture uncertain return
+wait-for Needs you
+expect took this loan
+expect I checked my account
+tap I checked my account
+wait-for Cleared
+wait 2000
+expect-missing Return not confirmed
+clean

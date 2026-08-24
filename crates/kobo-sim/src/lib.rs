@@ -855,85 +855,9 @@ struct SimulatedApps {
 }
 
 impl Default for SimulatedApps {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the simulator catalog mirrors the complete first-party Store listing"
-    )]
     fn default() -> Self {
         Self {
             catalog: vec![
-                simulated_app(
-                    "audiobook",
-                    "Audiobook Studio",
-                    "Audiobooks",
-                    "Research, narrate and play an original audiobook about any topic.",
-                    kobo_ui::Glyph::Headphones,
-                    &["network", "audio", "bluetooth-audio", "bluetooth-control"],
-                    true,
-                ),
-                simulated_app(
-                    "brief",
-                    "Daily Brief",
-                    "Daily Brief",
-                    "Collects the day's stories while you read something else.",
-                    kobo_ui::Glyph::Clock,
-                    &["network"],
-                    true,
-                ),
-                simulated_app(
-                    "chat",
-                    "AI Command Center",
-                    "AI Chat",
-                    "Ask a question and tap the answer, rather than typing one.",
-                    kobo_ui::Glyph::Chat,
-                    &["network"],
-                    true,
-                ),
-                simulated_app(
-                    "gallery",
-                    "Components",
-                    "Components",
-                    "Every UI primitive on real hardware, for checking by eye.",
-                    kobo_ui::Glyph::Chart,
-                    &["network"],
-                    true,
-                ),
-                simulated_app(
-                    "gutenbird",
-                    "Gutenbird",
-                    "Gutenbird",
-                    "Sixty thousand free books from Project Gutenberg.",
-                    kobo_ui::Glyph::Book,
-                    &["network", "frontlight-control"],
-                    true,
-                ),
-                simulated_app(
-                    "hn",
-                    "Hacker News",
-                    "Hacker News",
-                    "Top, New, Ask and Show, with whole comment threads.",
-                    kobo_ui::Glyph::News,
-                    &["network"],
-                    true,
-                ),
-                simulated_app(
-                    "magnet",
-                    "Magnet",
-                    "Magnet",
-                    "Find the hall sensor behind the bezel and watch it answer.",
-                    kobo_ui::Glyph::Magnet,
-                    &["cover-sensor"],
-                    true,
-                ),
-                simulated_app(
-                    "rss",
-                    "Feeds",
-                    "Feeds",
-                    "Follow a site by name and read its articles, not its layout.",
-                    kobo_ui::Glyph::Rss,
-                    &["network"],
-                    true,
-                ),
                 simulated_app(
                     "settings",
                     "Settings",
@@ -949,48 +873,12 @@ impl Default for SimulatedApps {
                     true,
                 ),
                 simulated_app(
-                    "sidekick",
-                    "Sidekick",
-                    "Sidekick",
-                    "Approve or deny what your coding agents ask to run, from here.",
-                    kobo_ui::Glyph::Key,
-                    &["network"],
-                    true,
-                ),
-                simulated_app(
-                    "sudoku",
-                    "Sudoku",
-                    "Sudoku",
-                    "A crisp touch-first Sudoku built for the e-ink panel.",
-                    kobo_ui::Glyph::Grid,
-                    &[],
-                    false,
-                ),
-                simulated_app(
                     "terminal",
                     "Terminal",
                     "Terminal",
                     "A shell on the panel, with keys that send rather than collect.",
                     kobo_ui::Glyph::Terminal,
                     &["shell"],
-                    true,
-                ),
-                simulated_app(
-                    "tictactoe",
-                    "Tic-tac-toe",
-                    "Tic-tac-toe",
-                    "Two players, one panel. Nought goes first.",
-                    kobo_ui::Glyph::Grid,
-                    &[],
-                    true,
-                ),
-                simulated_app(
-                    "todo",
-                    "Todo",
-                    "Todo",
-                    "A list that remembers itself. Tap an item to finish it.",
-                    kobo_ui::Glyph::Check,
-                    &[],
                     true,
                 ),
             ],
@@ -1752,7 +1640,7 @@ fn read_app_messages(
     // the owner would see after closing and reopening it.
     let store = Store::new(std::env::temp_dir().join("cobalt-sim-state"));
     // The shelf is where an application keeps what will not fit in a message:
-    // an audiobook, a downloaded book. Without one here every shelf request
+    // a downloaded book, a generated file. Without one here every shelf request
     // came back `Unwritable`, so the one class of application that most needs
     // to be developed off the device -- the ones that take four minutes and a
     // dozen network calls to produce a file -- was the one class that could
@@ -2163,6 +2051,165 @@ fn pret_fixture_path(url: &str) -> Option<&str> {
         .map(|suffix| suffix.split('?').next().unwrap_or(suffix))
 }
 
+/// The little the Prêt numérique fixture has to remember between requests.
+///
+/// The task runner is handed a bare function, so there is nowhere else to keep
+/// it. One simulator process serves one drive script, which is what makes a
+/// process-wide table honest here rather than a shortcut.
+struct PretFixtureState {
+    /// How far each request has got. A borrow that answered `complete` to the
+    /// first poll would mean the inline progress a reader actually sees was
+    /// never drawn by any test.
+    polls: Vec<(String, usize)>,
+    acknowledged: Vec<String>,
+    hook_retried: bool,
+}
+
+static PRET_STATE: Mutex<PretFixtureState> = Mutex::new(PretFixtureState {
+    polls: Vec::new(),
+    acknowledged: Vec::new(),
+    hook_retried: false,
+});
+
+fn pret_state() -> std::sync::MutexGuard<'static, PretFixtureState> {
+    PRET_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The settled requests the fixture starts with, newest first, as `/jobs`
+/// returns them. Between them they reach every surface the app has for an
+/// outcome only a person can settle.
+const PRET_SETTLED_JOBS: [(&str, &str); 4] = [
+    (
+        "fixture-uncertain",
+        r#"{"id":"fixture-uncertain","kind":"borrow","state":"borrow_uncertain","title":"Uncertain fixture title","catalog":"montreal","book_id":null,"created_at":"2026-08-23T12:40:00Z","updated_at":"2026-08-23T12:41:00Z","error_message":"Montréal took the request and then stopped answering, so the loan could not be confirmed.","dedup_key":"borrow:montreal:fixture-uncertain"}"#,
+    ),
+    (
+        "fixture-return-uncertain",
+        r#"{"id":"fixture-return-uncertain","kind":"return","state":"return_uncertain","title":"Fixture uncertain return","catalog":"montreal","book_id":"fixture-book-uncertain","created_at":"2026-08-23T12:30:00Z","updated_at":"2026-08-23T12:31:00Z","error_message":"Montréal did not confirm the return, so the loan is still listed.","dedup_key":"return:fixture-book-uncertain"}"#,
+    ),
+    (
+        "fixture-hook",
+        r#"{"id":"fixture-hook","kind":"import","state":"hook_failed","title":"Fixture unsent title","catalog":"banq","book_id":"fixture-book-hook","created_at":"2026-08-23T12:20:00Z","updated_at":"2026-08-23T12:21:00Z","error_message":"The hook exited with status 1. The LCPL was retained.","dedup_key":"import:fixture-book-hook"}"#,
+    ),
+    (
+        "fixture-auth",
+        r#"{"id":"fixture-auth","kind":"borrow","state":"auth_required","title":"Authentication fixture","catalog":"montreal","book_id":null,"created_at":"2026-08-23T12:10:00Z","updated_at":"2026-08-23T12:11:00Z","error_message":"Montréal needs authentication on the proxy.","dedup_key":"borrow:montreal:fixture-auth"}"#,
+    ),
+];
+
+/// The requests the fixture carries through to a settled state: id, kind,
+/// title, catalog, and the book they belong to once there is one.
+const PRET_ACTIVE_JOBS: [(&str, &str, &str, &str, &str); 5] = [
+    ("fixture-borrow-job", "borrow", "Dune", "montreal", ""),
+    ("fixture-hamlet-borrow-job", "borrow", "Hamlet", "banq", ""),
+    (
+        "fixture-earthsea-borrow-job",
+        "borrow",
+        "A Wizard of Earthsea",
+        "montreal",
+        "",
+    ),
+    (
+        "fixture-return-job",
+        "return",
+        "Fixture return title",
+        "montreal",
+        "fixture-book-montreal",
+    ),
+    (
+        "fixture-hook",
+        "import",
+        "Fixture unsent title",
+        "banq",
+        "fixture-book-hook",
+    ),
+];
+
+fn pret_progress(id: &str) -> &'static [&'static str] {
+    match id {
+        "fixture-return-job" => &["returning", "returned"],
+        "fixture-hook" => &["hook_running", "complete"],
+        _ => &["borrowing", "downloading", "complete"],
+    }
+}
+
+/// The state a carried request is in, advancing it by one step when asked.
+///
+/// Reading the list must not move anything along, or a screen that merely
+/// showed the row would finish the job.
+fn pret_active_state(id: &str, advance: bool) -> &'static str {
+    let steps = pret_progress(id);
+    let mut state = pret_state();
+    let seen = if let Some((_, count)) = state.polls.iter_mut().find(|(key, _)| key == id) {
+        if advance {
+            *count += 1;
+        }
+        *count
+    } else {
+        state.polls.push((id.to_owned(), usize::from(advance)));
+        usize::from(advance)
+    };
+    if seen == 0 {
+        return "queued";
+    }
+    steps[(seen - 1).min(steps.len() - 1)]
+}
+
+fn pret_job_json(id: &str, state: &str) -> Option<String> {
+    let (_, kind, title, catalog, book_id) = PRET_ACTIVE_JOBS.iter().find(|entry| entry.0 == id)?;
+    let book = if book_id.is_empty() {
+        "null".to_owned()
+    } else {
+        format!("\"{book_id}\"")
+    };
+    Some(format!(
+        r#"{{"id":"{id}","kind":"{kind}","state":"{state}","title":"{title}","catalog":"{catalog}","book_id":{book},"created_at":"2026-08-23T13:00:00Z","updated_at":"2026-08-23T13:00:05Z","dedup_key":"{kind}:{id}","acknowledged_at":null}}"#
+    ))
+}
+
+/// Whether this settled row is still the server's business to report.
+fn pret_settled_visible(id: &str) -> bool {
+    let state = pret_state();
+    if state.acknowledged.iter().any(|known| known == id) {
+        return false;
+    }
+    !(id == "fixture-hook" && state.hook_retried)
+}
+
+fn pret_jobs_body() -> Vec<u8> {
+    let mut rows = PRET_SETTLED_JOBS
+        .iter()
+        .filter(|(id, _)| pret_settled_visible(id))
+        .map(|(_, json)| (*json).to_owned())
+        .collect::<Vec<_>>();
+    // A resent delivery is no longer a settled failure, so it is reported at
+    // whatever state it has reached instead of vanishing from the list.
+    if pret_state().hook_retried {
+        let state = pret_active_state("fixture-hook", false);
+        if let Some(json) = pret_job_json("fixture-hook", state) {
+            rows.insert(0, json);
+        }
+    }
+    format!("{{\"jobs\":[{}]}}", rows.join(",")).into_bytes()
+}
+
+fn pret_books_body() -> Vec<u8> {
+    // The return row drops off the loan once the human has settled it, exactly
+    // as the proxy stops reporting an acknowledged return job.
+    let pending_return = pret_settled_visible("fixture-return-uncertain");
+    let uncertain_return = if pending_return {
+        r#","return_job_id":"fixture-return-uncertain","return_state":"return_uncertain""#
+    } else {
+        ""
+    };
+    format!(
+        r#"[{{"id":"fixture-book-montreal","title":"Fixture return title","catalog":"montreal","file_name":"Fixture return title.lcpl"}},{{"id":"fixture-book-banq","title":"Fixture BAnQ title","catalog":"banq","file_name":"Fixture BAnQ title.lcpl"}},{{"id":"fixture-book-hook","title":"Fixture unsent title","catalog":"banq","file_name":"Fixture unsent title.lcpl"}},{{"id":"fixture-book-uncertain","title":"Fixture uncertain return","catalog":"montreal","file_name":"Fixture uncertain return.lcpl"{uncertain_return}}}]"#
+    )
+    .into_bytes()
+}
+
 fn pret_fixture_fetch(
     url: &str,
     _offset: u32,
@@ -2172,19 +2219,63 @@ fn pret_fixture_fetch(
     let Some(path) = pret_fixture_path(url) else {
         return Err(kobo_protocol::TaskError::NotFound);
     };
+    // Montréal is held signed out on purpose: it is the only way a script can
+    // reach the advice the Settings screen gives for a catalogue nothing on the
+    // Kobo can fix. `/search` answers a different question -- whether the last
+    // search worked -- and is left working.
     let body = match path {
         "/health" => {
-            br#"{"status":"ok","version":"1","queue_depth":0,"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#
+            br#"{"status":"ok","version":"1","queue_depth":0,"catalogs":[{"catalog":"montreal","state":"auth_required"},{"catalog":"banq","state":"ready"}]}"#.to_vec()
         }
-        "/jobs" => {
-            r#"{"jobs":[{"id":"fixture-auth","kind":"borrow","state":"auth_required","title":"Authentication fixture","catalog":"montreal","error_message":"Montréal needs authentication on the proxy."},{"id":"fixture-hook","kind":"import","state":"hook_failed","title":"Hook fixture","catalog":"banq","error_message":"The hook exited with status 1. The LCPL was retained."}]}"#.as_bytes()
+        "/jobs" => pret_jobs_body(),
+        "/books" => pret_books_body(),
+        _ => {
+            let Some(id) = path.strip_prefix("/jobs/") else {
+                return Err(kobo_protocol::TaskError::NotFound);
+            };
+            if id.contains('/') {
+                return Err(kobo_protocol::TaskError::NotFound);
+            }
+            if let Some((_, json)) = PRET_SETTLED_JOBS
+                .iter()
+                .find(|(known, _)| *known == id && pret_settled_visible(known))
+            {
+                (*json).to_owned().into_bytes()
+            } else {
+                let state = pret_active_state(id, true);
+                pret_job_json(id, state)
+                    .ok_or(kobo_protocol::TaskError::NotFound)?
+                    .into_bytes()
+            }
         }
-        "/books" => {
-            br#"[{"id":"fixture-book-montreal","title":"Fixture return title","catalog":"montreal","file_name":"Fixture return title.lcpl"},{"id":"fixture-book-banq","title":"Fixture BAnQ title","catalog":"banq","file_name":"Fixture BAnQ title.lcpl"}]"#
-        }
-        _ => return Err(kobo_protocol::TaskError::NotFound),
     };
-    Ok(body.to_vec())
+    Ok(body)
+}
+
+/// The fixture's answer to `POST /jobs/{id}/acknowledge`.
+///
+/// A 409 for a request still in flight and a 404 for an unknown one reach an
+/// application as the same refusal, so both are one error here.
+fn pret_acknowledge(id: &str) -> Result<Vec<u8>, kobo_protocol::TaskError> {
+    let Some((_, json)) = PRET_SETTLED_JOBS.iter().find(|(known, _)| *known == id) else {
+        return Err(kobo_protocol::TaskError::NotFound);
+    };
+    if id == "fixture-hook" && pret_state().hook_retried {
+        return Err(kobo_protocol::TaskError::NotFound);
+    }
+    let mut state = pret_state();
+    if !state.acknowledged.iter().any(|known| known == id) {
+        state.acknowledged.push(id.to_owned());
+    }
+    drop(state);
+    // Acknowledging twice must answer the same thing, so the timestamp is fixed
+    // rather than taken from the clock.
+    Ok(json
+        .replace(
+            r#""dedup_key""#,
+            r#""acknowledged_at":"2026-08-23T13:05:00Z","dedup_key""#,
+        )
+        .into_bytes())
 }
 
 fn pret_fixture_post(
@@ -2210,21 +2301,46 @@ fn pret_fixture_post(
             r#"{"results":[{"title":"Dune","authors":["Frank Herbert"],"isbn":"9780441013593","description":"On the desert world Arrakis, Paul Atreides is drawn into a struggle over power, prophecy, and survival.","goodreads_rating":4.29,"goodreads_ratings_count":1700633,"goodreads_reviews_count":88668,"sources":[{"handle":"fixture-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
         }
     } else if path == "/jobs" {
-        if request_text.contains("fixture-hamlet-banq-handle") {
-            br#"{"id":"fixture-hamlet-borrow-job","kind":"borrow","state":"queued","title":"Hamlet","catalog":"banq"}"#
+        let id = if request_text.contains("fixture-hamlet-banq-handle") {
+            "fixture-hamlet-borrow-job"
         } else if request_text.contains("fixture-earthsea-montreal-handle") {
-            br#"{"id":"fixture-earthsea-borrow-job","kind":"borrow","state":"queued","title":"A Wizard of Earthsea","catalog":"montreal"}"#
+            "fixture-earthsea-borrow-job"
         } else {
-            br#"{"id":"fixture-borrow-job","kind":"borrow","state":"queued","title":"Dune","catalog":"montreal"}"#
+            "fixture-borrow-job"
+        };
+        return pret_accept(id);
+    } else if let Some(id) = path
+        .strip_prefix("/jobs/")
+        .and_then(|rest| rest.strip_suffix("/retry-hook"))
+    {
+        if id != "fixture-hook" || pret_state().hook_retried {
+            return Err(kobo_protocol::TaskError::NotFound);
         }
-    } else if path.starts_with("/jobs/") && path.ends_with("/retry-hook") {
-        br#"{"id":"fixture-hook-retry","kind":"import","state":"queued","title":"Hook fixture","catalog":"banq"}"#
+        pret_state().hook_retried = true;
+        pret_state().polls.retain(|(key, _)| key != id);
+        return pret_job_json(id, "stored")
+            .map(String::into_bytes)
+            .ok_or(kobo_protocol::TaskError::NotFound);
+    } else if let Some(id) = path
+        .strip_prefix("/jobs/")
+        .and_then(|rest| rest.strip_suffix("/acknowledge"))
+    {
+        return pret_acknowledge(id);
     } else if path.starts_with("/books/") && path.ends_with("/return") {
-        br#"{"id":"fixture-return-job","kind":"return","state":"queued","title":"Fixture return title","catalog":"montreal"}"#
+        return pret_accept("fixture-return-job");
     } else {
         return Err(kobo_protocol::TaskError::NotFound);
     };
     Ok(body.to_vec())
+}
+
+/// Accepts a borrow or return, starting it from `queued` so the app's own
+/// polling is what carries it to a settled state.
+fn pret_accept(id: &str) -> Result<Vec<u8>, kobo_protocol::TaskError> {
+    pret_state().polls.retain(|(key, _)| key != id);
+    pret_job_json(id, "queued")
+        .map(String::into_bytes)
+        .ok_or(kobo_protocol::TaskError::NotFound)
 }
 
 /// Gives the simulator the same type the panel gets.
@@ -2550,103 +2666,98 @@ mod tests {
             .expect("app-store request")
     }
 
+    /// Store and the launcher are separate processes reading one catalog, so
+    /// an install in the first has to be visible to the second. A `settings`
+    /// entry rides along to prove the system applications never appear in the
+    /// launcher's list and cannot be uninstalled.
     #[test]
     fn simulated_store_updates_and_reinstalls_in_one_session() {
-        use kobo_protocol::{DeviceRequest, DeviceResult};
+        use kobo_protocol::{DeviceError, DeviceRequest, DeviceResult};
 
-        let apps = Arc::new(Mutex::new(SimulatedApps::default()));
+        let mut catalog = SimulatedApps::default();
+        catalog.catalog.push(simulated_app(
+            "word-count",
+            "Word Count",
+            "Words",
+            "Counts words in a note.",
+            kobo_ui::Glyph::Note,
+            &[],
+            false,
+        ));
+        catalog.catalog.push(simulated_app(
+            "weather",
+            "Weather",
+            "Weather",
+            "A forecast for one place.",
+            kobo_ui::Glyph::Globe,
+            &["network"],
+            false,
+        ));
+        let apps = Arc::new(Mutex::new(catalog));
         {
             let mut state = apps.lock().expect("simulated apps");
-            let todo = state
+            let counter = state
                 .catalog
                 .iter_mut()
-                .find(|entry| entry.id == "todo")
-                .expect("Todo entry");
-            todo.version = "1.1.0".to_owned();
+                .find(|entry| entry.id == "word-count")
+                .expect("Word Count entry");
+            counter.version = "1.1.0".to_owned();
         }
         let store = Arc::new(Mutex::new(AppState::with_apps(Arc::clone(&apps))));
-        assert_eq!(
+        let install = |id: &str| {
             app_result(
                 &store,
                 "store",
                 Scenario::Normal,
-                &DeviceRequest::InstallApp {
-                    id: "todo".to_owned(),
-                },
-            ),
-            DeviceResult::Done
-        );
-        assert_eq!(
-            app_result(
-                &store,
-                "store",
-                Scenario::Normal,
-                &DeviceRequest::InstallApp {
-                    id: "sudoku".to_owned(),
-                },
-            ),
-            DeviceResult::Done
-        );
-        let launcher = Arc::new(Mutex::new(AppState::with_apps(apps)));
-        let DeviceResult::Apps { entries } = app_result(
-            &launcher,
-            "launcher",
-            Scenario::Normal,
-            &DeviceRequest::ListInstalledApps,
-        ) else {
-            panic!("installed list");
+                &DeviceRequest::InstallApp { id: id.to_owned() },
+            )
         };
-        assert_eq!(entries.len(), 12);
+        assert_eq!(install("word-count"), DeviceResult::Done);
+        assert_eq!(install("weather"), DeviceResult::Done);
+        let launcher = Arc::new(Mutex::new(AppState::with_apps(apps)));
+        let listed = || {
+            let DeviceResult::Apps { entries } = app_result(
+                &launcher,
+                "launcher",
+                Scenario::Normal,
+                &DeviceRequest::ListInstalledApps,
+            ) else {
+                panic!("installed list");
+            };
+            entries
+        };
+        let entries = listed();
+        assert_eq!(entries.len(), 2);
         assert_eq!(
             entries
                 .iter()
-                .find(|entry| entry.id == "todo")
+                .find(|entry| entry.id == "word-count")
                 .and_then(|entry| entry.installed_version.as_deref()),
             Some("1.1.0")
         );
-        assert!(entries.iter().any(|entry| entry.id == "sudoku"));
-        assert_eq!(
+        assert!(entries.iter().any(|entry| entry.id == "weather"));
+
+        let uninstall = |id: &str| {
             app_result(
                 &store,
                 "store",
                 Scenario::Normal,
-                &DeviceRequest::UninstallApp {
-                    id: "sudoku".to_owned(),
-                },
-            ),
-            DeviceResult::Done
-        );
-        let DeviceResult::Apps { entries } = app_result(
-            &launcher,
-            "launcher",
-            Scenario::Normal,
-            &DeviceRequest::ListInstalledApps,
-        ) else {
-            panic!("installed list");
+                &DeviceRequest::UninstallApp { id: id.to_owned() },
+            )
         };
-        assert_eq!(entries.len(), 11);
-        assert!(!entries.iter().any(|entry| entry.id == "sudoku"));
         assert_eq!(
-            app_result(
-                &store,
-                "store",
-                Scenario::Normal,
-                &DeviceRequest::InstallApp {
-                    id: "sudoku".to_owned(),
-                },
-            ),
-            DeviceResult::Done
+            uninstall("settings"),
+            DeviceResult::Failed(DeviceError::InvalidInput)
         );
-        let DeviceResult::Apps { entries } = app_result(
-            &launcher,
-            "launcher",
-            Scenario::Normal,
-            &DeviceRequest::ListInstalledApps,
-        ) else {
-            panic!("installed list");
-        };
-        assert_eq!(entries.len(), 12);
-        assert!(entries.iter().any(|entry| entry.id == "sudoku"));
+        assert_eq!(uninstall("weather"), DeviceResult::Done);
+        let entries = listed();
+        assert_eq!(entries.len(), 1);
+        assert!(!entries.iter().any(|entry| entry.id == "weather"));
+
+        assert_eq!(install("weather"), DeviceResult::Done);
+        let entries = listed();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.id == "weather"));
     }
 
     #[test]
@@ -2687,7 +2798,7 @@ mod tests {
                 "store",
                 Scenario::StorageFull,
                 &DeviceRequest::InstallApp {
-                    id: "sudoku".to_owned(),
+                    id: "word-count".to_owned(),
                 },
             ),
             DeviceResult::Failed(DeviceError::Backend)
@@ -2698,7 +2809,7 @@ mod tests {
                 "store",
                 Scenario::Offline,
                 &DeviceRequest::InstallApp {
-                    id: "sudoku".to_owned(),
+                    id: "word-count".to_owned(),
                 },
             ),
             DeviceResult::Failed(DeviceError::Unreachable)
@@ -2709,18 +2820,33 @@ mod tests {
                 "store",
                 Scenario::NetworkTimeout,
                 &DeviceRequest::InstallApp {
-                    id: "sudoku".to_owned(),
+                    id: "word-count".to_owned(),
                 },
             ),
             DeviceResult::Failed(DeviceError::TimedOut)
         );
     }
 
+    /// What Store offers and what the launcher can start are different lists.
+    /// An application in the catalog that nobody has installed belongs in the
+    /// first and not the second.
     #[test]
-    fn simulated_catalog_contains_store_only_sudoku() {
+    fn an_uninstalled_catalog_entry_reaches_store_and_not_the_launcher() {
         use kobo_protocol::{DeviceRequest, DeviceResult};
 
-        let state = Arc::new(Mutex::new(AppState::default()));
+        let mut catalog = SimulatedApps::default();
+        catalog.catalog.push(simulated_app(
+            "word-count",
+            "Word Count",
+            "Words",
+            "Counts words in a note.",
+            kobo_ui::Glyph::Note,
+            &[],
+            false,
+        ));
+        let state = Arc::new(Mutex::new(AppState::with_apps(Arc::new(Mutex::new(
+            catalog,
+        )))));
         let DeviceResult::Apps { entries } = app_result(
             &state,
             "store",
@@ -2729,12 +2855,21 @@ mod tests {
         ) else {
             panic!("catalog");
         };
-        let sudoku = entries
+        let offered = entries
             .iter()
-            .find(|entry| entry.id == "sudoku")
-            .expect("Sudoku catalog entry");
-        assert_eq!(sudoku.version, "1.0.0");
-        assert!(!sudoku.is_installed());
+            .find(|entry| entry.id == "word-count")
+            .expect("Word Count catalog entry");
+        assert_eq!(offered.version, "1.0.0");
+        assert!(!offered.is_installed());
+        let DeviceResult::Apps { entries } = app_result(
+            &state,
+            "launcher",
+            Scenario::Normal,
+            &DeviceRequest::ListInstalledApps,
+        ) else {
+            panic!("installed list");
+        };
+        assert!(entries.is_empty());
     }
 
     #[test]
@@ -3165,5 +3300,85 @@ mod tests {
         );
         fs::remove_file(socket_path).expect("remove replacement");
         fs::remove_dir(root).expect("remove private directory");
+    }
+
+    /// The fixture is what every Prêt numérique drive script runs against, so
+    /// its contract with the app is worth asserting here rather than only
+    /// through a screenshot.
+    #[test]
+    fn pret_fixture_carries_a_borrow_through_to_a_settled_state() {
+        let accepted = pret_fixture_post(
+            "https://home.lapal.me:3300/pret/v1/jobs",
+            br#"{"publication_handle":"fixture-montreal-handle"}"#,
+            "application/json",
+            None,
+            &[],
+            4096,
+        )
+        .expect("the fixture accepts a borrow");
+        let accepted = String::from_utf8(accepted).expect("utf-8");
+        assert!(accepted.contains(r#""id":"fixture-borrow-job""#));
+        assert!(accepted.contains(r#""state":"queued""#));
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let body = pret_fixture_fetch(
+                "https://home.lapal.me:3300/pret/v1/jobs/fixture-borrow-job",
+                0,
+                4096,
+                &[],
+            )
+            .expect("the fixture answers a poll");
+            seen.push(String::from_utf8(body).expect("utf-8"));
+        }
+        assert!(seen[0].contains(r#""state":"borrowing""#), "{}", seen[0]);
+        assert!(seen[1].contains(r#""state":"downloading""#), "{}", seen[1]);
+        assert!(seen[2].contains(r#""state":"complete""#), "{}", seen[2]);
+        assert!(
+            seen[3].contains(r#""state":"complete""#),
+            "a settled job stays settled"
+        );
+    }
+
+    #[test]
+    fn pret_fixture_acknowledges_once_and_stops_reporting_the_row() {
+        let jobs = String::from_utf8(
+            pret_fixture_fetch("https://home.lapal.me:3300/pret/v1/jobs", 0, 4096, &[])
+                .expect("the fixture lists jobs"),
+        )
+        .expect("utf-8");
+        assert!(jobs.contains("fixture-uncertain"));
+        // Newest first.
+        assert!(jobs.find("fixture-uncertain") < jobs.find("fixture-auth"));
+
+        let first = String::from_utf8(
+            pret_acknowledge("fixture-uncertain").expect("a settled job can be acknowledged"),
+        )
+        .expect("utf-8");
+        let second = String::from_utf8(
+            pret_acknowledge("fixture-uncertain").expect("acknowledging twice is the same answer"),
+        )
+        .expect("utf-8");
+        assert_eq!(first, second);
+        assert!(first.contains(r#""acknowledged_at":"2026-08-23T13:05:00Z""#));
+
+        let jobs = String::from_utf8(
+            pret_fixture_fetch("https://home.lapal.me:3300/pret/v1/jobs", 0, 4096, &[])
+                .expect("the fixture lists jobs"),
+        )
+        .expect("utf-8");
+        assert!(!jobs.contains("fixture-uncertain"));
+        assert_eq!(
+            pret_acknowledge("no-such-job"),
+            Err(kobo_protocol::TaskError::NotFound)
+        );
+        // The proxy answers 409 for a request still in flight and 404 for one
+        // it has never heard of. Both reach an application as one refusal, so
+        // the fixture may not pretend to tell them apart.
+        assert_eq!(
+            pret_acknowledge("fixture-borrow-job"),
+            Err(kobo_protocol::TaskError::NotFound)
+        );
+        pret_state().acknowledged.clear();
     }
 }

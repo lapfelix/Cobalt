@@ -14,7 +14,7 @@ Registry fields:
 
 | Field | Meaning |
 |---|---|
-| `package` | Workspace Cargo package, such as `kobo-sudoku` |
+| `package` | Workspace Cargo package, `kobo-<app-id>` |
 | `id` | Stable lowercase Store and launcher identifier |
 | `display_name` | Full Store title |
 | `short_label` | Compact launcher label |

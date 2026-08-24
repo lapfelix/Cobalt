@@ -77,10 +77,10 @@ a workspace member. (`cargo run -p kobo-cli` only works from inside this
 repository, which is why the CLI goes on your PATH for this route.)
 
 For something you intend to put on a reader, start in `examples/` instead.
-Copy the smallest application as a base:
+Copy the same starting point into the workspace:
 
 ```sh
-cp -r examples/todo examples/myapp
+cp -r examples/hello examples/myapp
 ```
 
 Its `Cargo.toml` is the whole manifest an application needs:
@@ -233,9 +233,6 @@ builder is a chain: every method that adds or configures UI returns `Self`.
 This is the app-facing UI vocabulary; apps do not draw arbitrary pixels or
 instantiate renderer-internal `Node` variants directly.
 
-The [component gallery](examples/gallery/README.md) shows these primitives on
-the actual E Ink renderer and is the quickest visual reference.
-
 ### Screen structure and overlays
 
 | Method | What it is |
@@ -369,9 +366,9 @@ and device rendering use the same metrics.
 
 ### Icons
 
-`Glyph` is a closed set. `Glyph::ALL` is the whole of it and is what the
-gallery and the vector tests enumerate, so a glyph that is added without being
-drawn fails a test rather than shipping as an empty box.
+`Glyph` is a closed set. `Glyph::ALL` is the whole of it and is what the vector
+tests enumerate, so a glyph that is added without being drawn fails a test
+rather than shipping as an empty box.
 
 They are geometry, not bitmaps: authored in a 1000 unit box and rasterised
 with coverage antialiasing at whatever size the layout asks for, so they are
@@ -391,8 +388,7 @@ Adding one is two lines and a command. Name the `Glyph`, put it in `Glyph::ALL`,
 add a row to `tools/icon-import/icons.txt` naming any of the five thousand
 icons in the upstream set, and run `scripts/import-icons.sh`. The lookup the
 importer generates is exhaustive, so a `Glyph` with no row in that file does
-not compile. Then draw it in the gallery, or the conformance test fails. Judge
-the result by eye rather than by test:
+not compile. Judge the result by eye rather than by test:
 
 ```
 cargo test -p kobo-ui contact_sheet -- --ignored --nocapture
@@ -423,7 +419,7 @@ next to the words "30 sec". If you cannot draw the whole meaning, use a label.
 The label is still given and still carried on the wire. It is the action's
 name and the only thing a reader could be told out loud; it is simply not set
 on the panel. Anything that must be *read* belongs somewhere that is read: the
-audiobook player moved "Loading…" off its play button and onto the position
+SDK's audio player moved "Loading…" off its play button and onto the position
 line above it, which was going to change anyway.
 
 ### How a screen is composed
@@ -702,10 +698,6 @@ something the builder remembers. Two things to get right:
   otherwise let the runtime take Back, claim it with `with_own_back(true)`
   while the menu is open, or putting the menu away closes the application.
 
-Feeds is the worked example: the mark on a feed offers to stop following it,
-which used to mean opening the feed first and fetching a feed you had already
-decided you did not want.
-
 ### What stands at the head of a row
 
 The fourth element of a `rows` tuple is anything that converts into a
@@ -845,12 +837,12 @@ wrong is a way to be slow or to be unsafe.
   stores them, and a window into a compressed stream cannot be expanded on its
   own, so a piece of a document is asked for uncompressed. The bytes counted
   are the bytes asked for.
-- **The connection is kept.** A screen of Hacker News comments is two dozen
-  requests to one host, and each used to pay for its own TCP connection and
-  TLS handshake. The runtime holds the last connection open and asks the next
-  question on it, which on a slow link roughly halves the time to fill that
-  screen. Only a `Fetch` does this: a `Post` may have been acted on by the far
-  end, so it is never the request that gets repeated.
+- **The connection is kept.** A screen built from two dozen small replies is
+  two dozen requests to one host, and each used to pay for its own TCP
+  connection and TLS handshake. The runtime holds the last connection open and
+  asks the next question on it, which on a slow link roughly halves the time to
+  fill that screen. Only a `Fetch` does this: a `Post` may have been acted on
+  by the far end, so it is never the request that gets repeated.
 
 None of this changes what `on_task` receives. It is the same bytes, sooner.
 
@@ -1162,9 +1154,8 @@ application that ignores them:
   told and must ask again when it returns.
 
 The runtime settles the sensor's bounce before telling anyone, so what arrives
-is movement rather than noise. `examples/magnet` is the whole surface on one
-screen, and doubles as the calibration screen: nothing on the case says where
-the sensor is, so you walk a magnet along the edges and watch for the answer.
+is movement rather than noise. Nothing on the case says where the sensor is, so
+finding it means walking a magnet along the edges and watching for the answer.
 
 For a complete playback screen, use the SDK component rather than rebuilding
 transport and pairing state:
@@ -1235,8 +1226,11 @@ the one thing this is arranged to avoid.
 The current target is the measured `clara-bw-391` profile: 1072 × 1448 at 300
 PPI, rotation 3, with display taps converted through the Clara's raw controller
 ranges before SDK hit testing. The runtime and simulator share the exact Rust
-refresh planner, including dirty rectangles, DU/GL16/GC16 selection and an
-eight-partial-update cleaning cadence. The browser's visible residue is an
+refresh planner, including dirty rectangles, DU/GL16/GC16 selection and a
+cleaning cadence of eight panels' worth of repainted pixels. The device runtime
+alone overrides that selection for an on-screen keyboard: two-level for a
+keystroke, clearing when the keys are relabelled or the keyboard closes. The
+browser's visible residue is an
 explicit approximation (an LCD cannot reproduce electrophoretic physics) and
 the **Show ideal pixels** control makes that boundary inspectable. Keeping this
 authoritative logic in the native simulator avoids adding a second WASM build
@@ -1327,7 +1321,7 @@ one loop this SDK had no way to close.
 
 ```sh
 # One terminal: the app, in the simulator.
-cd examples/gutenbird && cargo run -p kobo-cli -- dev 127.0.0.1:8787
+cd apps/pret-numerique && cargo run -p kobo-cli -- dev 127.0.0.1:8787
 
 # Another: drive it, and bring pictures back.
 cargo run -p kobo-cli -- drive --script tour.kobo --shots target/shots
@@ -1476,7 +1470,7 @@ External dependencies live behind narrow interfaces in `kobo-net`,
 do not depend on the particular HTTP, font, terminal, image or kernel binding
 implementation.
 
-Worked examples, smallest first: `examples/tictactoe`, `examples/todo` (state
-that survives a restart), `examples/gallery` (every primitive on one screen),
-`examples/terminal`, `examples/brief` (work that continues in the background),
-`examples/launcher`, `examples/chat`, `examples/gutenbird`.
+Worked examples, smallest first: `examples/hello` (a screen, two buttons and a
+battery reading), `examples/terminal`, `examples/store`, `examples/launcher`,
+`examples/settings`, `apps/pret-numerique` (a keyboard, retried requests and
+state that survives a restart).

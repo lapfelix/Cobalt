@@ -17,7 +17,7 @@
 # do move; nothing else on the reader is touched.
 #
 # usage: scripts/record-apps.sh --device IP [--out DIR] [--seconds N]
-#                               [--fps F] [--apps "hn rss todo"]
+#                               [--fps F] [--apps "launcher terminal"]
 
 set -eu
 
@@ -25,7 +25,7 @@ DEVICE=""
 OUT=""
 SECONDS_EACH=24
 FPS=2
-APPS="launcher hn rss brief gutenbird todo tictactoe gallery terminal chat settings magnet audiobook"
+APPS="launcher terminal settings"
 
 usage() {
     sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
@@ -65,30 +65,12 @@ TAP_BACK="80,80"
 # moved underneath it.
 steps_for() {
     case "$1" in
-        # A list, a story, and back to the list.
-        hn|rss|brief|gutenbird)
-            echo "7:$TAP_CONTENT 6:$TAP_BACK 4:$TAP_BAR" ;;
-        # A board takes taps anywhere and has no back.
-        tictactoe)
-            echo "5:$TAP_CONTENT 3:400,700 3:670,700 3:536,900" ;;
         # A keyboard, so the taps go to where the keys are.
-        chat|terminal)
+        terminal)
             echo "6:$TAP_BAR 4:300,1100 3:500,1100 3:700,1100" ;;
         # Rows that open a pane each, and the way back from each of them.
         settings)
             echo "5:536,770 5:$TAP_BACK 4:536,525 4:$TAP_BACK" ;;
-        # A shelf, the player it opens, and back to the shelf.
-        audiobook)
-            echo "5:530,250 8:$TAP_BACK" ;;
-        # No bar and no list to open, so the default route taps dead space
-        # three times and records a screen that never moves. Open the compose
-        # screen and come back instead, which changes nothing on the device.
-        todo)
-            echo "5:536,755 9:$TAP_BACK" ;;
-        # Nothing to tap. The screen only moves when a magnet does, so this
-        # records whatever the sensor says for the length of the run.
-        magnet)
-            echo "" ;;
         # Tiles, then the second page of them. The bar has two controls on the
         # first page, not three, so "More apps" sits where it does below.
         launcher)

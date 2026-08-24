@@ -1,0 +1,15 @@
+# The way out, from each of the three places in the app. A menu entry can
+# present this app directly, and an app presented that way is home: nothing but
+# this slot leads back to the stock reader.
+#
+# Last step on purpose. Taking it ends the session, so the simulator closes the
+# connection and nothing after it can be driven.
+clean
+expect Kobo reader
+tap Library
+wait-for My loans
+expect Kobo reader
+tap Settings
+wait-for Connection
+expect Kobo reader
+tap Kobo reader

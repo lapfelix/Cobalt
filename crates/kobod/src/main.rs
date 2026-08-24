@@ -369,7 +369,7 @@ fn serve_simulation(socket_path: &Path, frame_path: &Path) -> Result<(), Box<dyn
 /// Where a host runtime looks for owner-installed TLS trust roots.
 ///
 /// One fixed place, `~/.config/kobo/trust`, mirroring where the CLI keeps
-/// host-side credentials, so `kobo-sidekick init` can drop a certificate in
+/// host-side credentials, so `kobo-sidekickd init` can drop a certificate in
 /// and every host runtime finds it without being told.
 fn host_trust_directory() -> PathBuf {
     env::var_os("HOME").map_or_else(
@@ -802,7 +802,7 @@ mod tests {
         // which is the one defect that leaves somebody stuck on a reader and
         // was the only part of a screen that could not be checked without one.
         assert!(!super::simulated_chrome("launcher", &plain()).back);
-        for name in ["rss", "hn", "gutenbird", "todo", "terminal"] {
+        for name in ["settings", "store", "terminal", "pret-numerique"] {
             assert!(
                 super::simulated_chrome(name, &plain()).back,
                 "{name} had no way back"
@@ -817,9 +817,11 @@ mod tests {
         // height made a layout fault that only exists with one invisible. The
         // launcher's first row of tiles was drawn underneath its own title on
         // real hardware while this looked perfect.
-        assert!(super::simulated_chrome("rss", &plain()).status.is_some());
+        assert!(super::simulated_chrome("settings", &plain())
+            .status
+            .is_some());
         // Except over a book, which is where the device withholds it too.
-        assert!(super::simulated_chrome("gutenbird", &book())
+        assert!(super::simulated_chrome("pret-numerique", &book())
             .status
             .is_none());
     }
@@ -828,11 +830,11 @@ mod tests {
     fn an_application_with_no_bar_of_its_own_is_given_one_to_go_back_from() {
         let bare = kobo_ui::Screen::new(1, Vec::new());
         assert!(bare.top_bar.is_none());
-        let chrome = super::simulated_chrome("rss", &bare);
-        let fixed = kobo_ui::ensure_way_back(bare, &chrome, "Feeds");
+        let chrome = super::simulated_chrome("settings", &bare);
+        let fixed = kobo_ui::ensure_way_back(bare, &chrome, "Settings");
         assert_eq!(
             fixed.top_bar.expect("a bar to hold the way back").title,
-            "Feeds"
+            "Settings"
         );
     }
 

@@ -29,114 +29,13 @@ struct BuiltinApp {
     capabilities: &'static [&'static str],
 }
 
-const MANAGED_BUILTINS: &[BuiltinApp] = &[
-    BuiltinApp {
-        id: "audiobook",
-        title: "Audiobook Studio",
-        label: "Audiobooks",
-        summary: "Research, narrate and play an original audiobook about any topic.",
-        version: "1.0.0",
-        glyph: Glyph::Headphones,
-        // `bluetooth-control` is here because the player this application
-        // opens is `kobo_sdk::audio::AudioPlayer`, and the Clara BW has no
-        // speaker: when no audio device is connected, Play shows the
-        // component's own picker, which scans, pairs and connects. Those are
-        // `bluetooth-control` requests made on the application's behalf, so
-        // declaring only `bluetooth-audio` left Play refused the moment a
-        // reader had nothing paired -- which is every reader, the first time.
-        capabilities: &["network", "audio", "bluetooth-audio", "bluetooth-control"],
-    },
-    BuiltinApp {
-        id: "brief",
-        title: "Daily Brief",
-        label: "Daily Brief",
-        summary: "Collects the day's stories while you read something else.",
-        version: "1.0.0",
-        glyph: Glyph::Clock,
-        capabilities: &["network"],
-    },
-    BuiltinApp {
-        id: "chat",
-        title: "AI Command Center",
-        label: "AI Chat",
-        summary: "Ask a question and tap the answer, rather than typing one.",
-        version: "1.0.0",
-        glyph: Glyph::Chat,
-        capabilities: &["network"],
-    },
-    BuiltinApp {
-        id: "gallery",
-        title: "Components",
-        label: "Components",
-        summary: "Every UI primitive on real hardware, for checking by eye.",
-        version: "1.0.0",
-        glyph: Glyph::Chart,
-        capabilities: &["network"],
-    },
-    BuiltinApp {
-        id: "gutenbird",
-        title: "Gutenbird",
-        label: "Gutenbird",
-        summary: "Sixty thousand free books from Project Gutenberg.",
-        version: "1.0.0",
-        glyph: Glyph::Book,
-        capabilities: &["network", "frontlight-control"],
-    },
-    BuiltinApp {
-        id: "hn",
-        title: "Hacker News",
-        label: "Hacker News",
-        summary: "Top, New, Ask and Show, with whole comment threads.",
-        version: "1.0.0",
-        glyph: Glyph::News,
-        capabilities: &["network"],
-    },
-    BuiltinApp {
-        id: "magnet",
-        title: "Magnet",
-        label: "Magnet",
-        summary: "Find the hall sensor behind the bezel and watch it answer.",
-        version: "1.0.0",
-        glyph: Glyph::Magnet,
-        capabilities: &["cover-sensor"],
-    },
-    BuiltinApp {
-        id: "rss",
-        title: "Feeds",
-        label: "Feeds",
-        summary: "Follow a site by name and read its articles, not its layout.",
-        version: "1.0.0",
-        glyph: Glyph::Rss,
-        capabilities: &["network"],
-    },
-    BuiltinApp {
-        id: "sidekick",
-        title: "Sidekick",
-        label: "Sidekick",
-        summary: "Approve or deny what your coding agents ask to run, from here.",
-        version: "1.0.0",
-        glyph: Glyph::Key,
-        capabilities: &["network"],
-    },
-    BuiltinApp {
-        id: "tictactoe",
-        title: "Tic-tac-toe",
-        label: "Tic-tac-toe",
-        summary: "Two players, one panel. Nought goes first.",
-        version: "1.0.0",
-        glyph: Glyph::Grid,
-        capabilities: &[],
-    },
-    BuiltinApp {
-        id: "todo",
-        title: "Todo",
-        label: "Todo",
-        summary: "A list that remembers itself. Tap an item to finish it.",
-        version: "1.0.0",
-        glyph: Glyph::Check,
-        capabilities: &[],
-    },
-];
+/// Public Store applications this platform package ships a built-in copy of.
+///
+/// Empty: the package carries the launcher, the system applications and
+/// `kobo-pret-numerique`, and none of those is offered through Store. An
+/// application arriving from the catalog is installed under `apps/` and needs
+/// no entry here.
+const MANAGED_BUILTINS: &[BuiltinApp] = &[];
 
 const SYSTEM_APPS: &[BuiltinApp] = &[
     BuiltinApp {
@@ -914,75 +813,36 @@ mod tests {
         (json, signature, package)
     }
 
+    /// A system application is not a Store one. Store may not update it,
+    /// uninstall it, or speak for what it is allowed to reach, and the two
+    /// tables are the only thing keeping those apart.
     #[test]
-    fn bundled_apps_update_uninstall_and_reinstall_in_place() {
-        let root = root();
-        fs::create_dir_all(root.join("bin")).expect("built-in directory");
-        fs::write(builtin_binary(&root, "todo"), b"built-in todo").expect("built-in Todo");
-
-        let initial = installed(&root).expect("initial installed apps");
-        assert_eq!(initial.len(), 1);
-        assert_eq!(initial[0].id, "todo");
-        assert_eq!(initial[0].installed_version.as_deref(), Some("1.0.0"));
-        assert_eq!(
-            resolve(&root, "todo").expect("resolve built-in"),
-            builtin_binary(&root, "todo")
-        );
-
-        uninstall(&root, "todo").expect("uninstall built-in");
-        assert!(installed(&root).expect("removed apps").is_empty());
-        assert!(resolve(&root, "todo").is_err());
-
-        let seed = [9_u8; 32];
-        let key = derive_public_key(&seed).expect("key");
-        let (json, signature, package) = release_for(&seed, "todo", "1.1.0");
-        refresh_with(&root, &key, |url, _| {
-            if url == CATALOG_URL {
-                Ok(json.clone())
-            } else {
-                Ok(signature.clone())
-            }
-        })
-        .expect("refresh update");
-        install_with(&root, "todo", &key, |_, _| Ok(package.clone())).expect("reinstall");
-        let installed = installed_manifests(&root, &key).expect("reinstalled manifest");
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].version(), "1.1.0");
-        assert!(!is_uninstalled(&root, "todo").expect("tombstone state"));
-
-        let (json, signature, package) = release_for(&seed, "todo", "1.2.0");
-        refresh_with(&root, &key, |url, _| {
-            if url == CATALOG_URL {
-                Ok(json.clone())
-            } else {
-                Ok(signature.clone())
-            }
-        })
-        .expect("refresh second update");
-        install_with(&root, "todo", &key, |_, _| Ok(package.clone())).expect("update in place");
-        let installed = installed_manifests(&root, &key).expect("updated manifest");
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].version(), "1.2.0");
-        let _ignored = fs::remove_dir_all(root);
+    fn system_applications_are_not_store_managed() {
+        for id in SYSTEM_APPS.iter().map(|app| app.id) {
+            assert!(!manages_builtin(id), "{id} is managed by Store");
+            assert!(builtin_declared(id).is_none(), "{id}");
+            assert!(
+                uninstall(&root(), id).is_err(),
+                "{id} was uninstallable through Store"
+            );
+        }
     }
 
+    /// A binary in `bin/` is not a Store application on its own. Nothing in
+    /// the package is offered through Store, so one left behind by an older
+    /// package must not be listed as installed or resolved as if it were.
     #[test]
-    fn bundled_apps_use_the_same_capabilities_as_their_store_manifests() {
-        assert!(builtin_declared("todo")
-            .expect("Todo declaration")
-            .is_empty());
-        let audiobook = builtin_declared("audiobook").expect("Audiobook declaration");
-        assert!(audiobook.holds(kobo_policy::Capability::Network));
-        assert!(audiobook.holds(kobo_policy::Capability::Audio));
-        assert!(audiobook.holds(kobo_policy::Capability::BluetoothAudio));
-        // The player is `kobo_sdk::audio::AudioPlayer`, and on a device with
-        // no speaker its picker scans, pairs and connects when nothing is
-        // connected yet. Those are `bluetooth-control` requests, so an
-        // application that shows that player and does not declare it has a
-        // Play button that is refused for every reader who has not already
-        // paired something -- which is every reader, once.
-        assert!(audiobook.holds(kobo_policy::Capability::BluetoothControl));
-        assert!(builtin_declared("terminal").is_none());
+    fn a_binary_with_no_entry_behind_it_is_not_a_store_application() {
+        let root = root();
+        fs::create_dir_all(root.join("bin")).expect("built-in directory");
+        fs::write(
+            builtin_binary(&root, "todo"),
+            b"a binary from an older package",
+        )
+        .expect("stale binary");
+        assert!(installed(&root).expect("installed apps").is_empty());
+        assert!(resolve(&root, "todo").is_err());
+        let _ignored = fs::remove_dir_all(root);
     }
 
     #[test]

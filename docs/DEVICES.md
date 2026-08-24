@@ -110,7 +110,7 @@ Cobalt session is refused rather than worked around, since the files being
 replaced are the ones it is executing.
 
 Neither path starts anything. Run `.adds/cobalt/start.sh` over SSH, or add
-the single NickelMenu line from the Cobalt install instructions. The runtime
+the NickelMenu lines from the Cobalt install instructions. The runtime
 package deliberately contains no README or license files: Kobo indexes plain
 text under `.adds/` as books.
 
@@ -127,8 +127,8 @@ kobo setup            # with the reader connected by USB and showing 'Connected'
 
 It finds the mounted reader, copies Cobalt into `.adds/cobalt`, reads every
 file back to prove it arrived intact, sets
-`DeveloperSettings/ForceWifiOn` and `PowerOptions/AutoSleepMinutes=90`, adds a
-**Cobalt** entry to the reader's own menu, and ejects. It leaves the firmware's
+`DeveloperSettings/ForceWifiOn` and `PowerOptions/AutoSleepMinutes=90`, adds the
+**Cobalt** and **Prêt numérique** entries to the reader's own menu, and ejects. It leaves the firmware's
 root SSH server disabled.
 
 Developers who need Wi-Fi deployment may opt in explicitly:
@@ -210,16 +210,29 @@ under `.adds/cobalt`.
 
 ### The one archive setup does stage, and what is checked first
 
-There is exactly one exception, and it is the menu entry. A way into Cobalt from
+There is exactly one exception, and it is the menu entries. A way into Cobalt from
 the reader's own home screen means running code inside `nickel`, and nothing on
 the book partition can do that. `kobo setup` therefore stages
 [NickelMenu](https://pgaskin.net/NickelMenu), pinned to one release, downloaded
 over HTTPS and checked against a recorded SHA-256, so the transport does not have
-to be trusted, and writes a single entry beside it:
+to be trusted, and writes two entries beside it:
 
 ```
 menu_item :main :Cobalt :cmd_spawn :quiet:/mnt/onboard/.adds/cobalt/start.sh
+menu_item :main :Prêt numérique :cmd_spawn :quiet:/mnt/onboard/.adds/cobalt/pret-numerique.sh
 ```
+
+The first presents the launcher. The second presents Prêt numérique directly,
+which is a session with no launcher in it: `pret-numerique.sh` is
+`start.sh kobo-pret-numerique`, and `start.sh` presents whatever its first
+argument names, defaulting to the launcher.
+
+Both entries, not one. An application cannot start another one, so a session
+that presents Prêt numérique has no route to Settings, Terminal or Store; the
+launcher entry is the only one there is. And an application that is presented is
+*home*, so the runtime draws no back control of its own — which is why Prêt
+numérique carries a `Kobo reader` slot in its own bottom bar. Without that slot
+the only way out of a direct session would be a power cycle.
 
 `--no-menu` skips all of it.
 
@@ -240,13 +253,13 @@ archive naming `./etc/init.d/rcS` is the one that ends a device, and it is
 refused by name. It also refuses to overwrite an archive some other mod has
 already staged, since `.kobo/KoboRoot.tgz` is a single shared slot.
 
-`kobo setup --undo` takes the entry away. If the reader has not restarted yet it
+`kobo setup --undo` takes the entries away. If the reader has not restarted yet it
 simply takes the staged archive back, and nothing was ever installed. If it has,
 it writes NickelMenu's own uninstall flag, unless another mod still has a
-configuration file beside ours, in which case the plugin stays and only the
-Cobalt entry goes, because it is shared.
+configuration file beside ours, in which case the plugin stays and only
+Cobalt's own configuration file goes, because the plugin is shared.
 
-The entry starts Cobalt **on demand**, and deliberately not at boot. `kobod` has
+Either entry starts Cobalt **on demand**, and deliberately not at boot. `kobod` has
 one mode and it is to stop `nickel` and take the panel, so starting it at boot
 would leave a device with no stock reader on it, and would spend the safety net
 every risky thing in this project leans on, which is that restarting always
@@ -548,10 +561,10 @@ HTTPS, including a 24 MB download.
 Proven on the physical N605: the same four bounded GC16, reversible-pixel,
 whole-screen restore, and DU stages; the Elan touch transform against a
 physical top-left touch; guardian restoration after a deliberate child
-failure; a Todo session rendered at 1404×1872 with physical taps reaching UI
-actions; release of panel and touch followed by a successful stock-reader
-restart; and suspend/resume with monotonic device uptime and no Cobalt process
-left running.
+failure; an application session rendered at 1404×1872 with physical taps
+reaching UI actions; release of panel and touch followed by a successful
+stock-reader restart; and suspend/resume with monotonic device uptime and no
+Cobalt process left running.
 
 Proven on the physical N506: the measured `fts_ts` touch transform; the NTx
 GC16 refresh; reversible GC16 and DU pixel restores; whole-screen snapshot and

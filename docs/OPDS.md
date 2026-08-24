@@ -1,21 +1,22 @@
 # OPDS in Cobalt
 
-How Gutenbird stopped being a client of one website and became a client of a
-protocol.
+How a catalog client stops being a client of one website and becomes a client
+of a protocol.
 
 ## Why this changed
 
-Gutenbird was written against [Gutendex](https://gutendex.com), a JSON front
-end to Project Gutenberg's metadata. Gutendex is not a standard: it is one
-service, run by one person, answering in a shape nobody else answers in. An
-application built on it can read exactly one library.
+The first catalog client here was written against
+[Gutendex](https://gutendex.com), a JSON front end to Project Gutenberg's
+metadata. Gutendex is not a standard: it is one service, run by one person,
+answering in a shape nobody else answers in. An application built on it can
+read exactly one library.
 
 OPDS — the Open Publication Distribution System — is the shape the rest of the
 world answers in. Project Gutenberg publishes one. So do Standard Ebooks,
 Feedbooks, every Calibre server, every library running Library Simplified, and
-anyone who has ever pointed an ereader at a URL. Speaking OPDS turns Gutenbird
-from an application that reads Gutenberg into an application that reads
-libraries, of which Gutenberg is one.
+anyone who has ever pointed an ereader at a URL. Speaking OPDS turns a client
+that reads Gutenberg into a client that reads libraries, of which Gutenberg is
+one.
 
 There are two versions in the world at once, and both have to be spoken:
 
@@ -58,9 +59,9 @@ the string `data:image/png;base64,iVBOR…`.
 
 **There is no plain text.** The entry document offers `epub3`, `epub`, `kf8`
 and `kindle`, and nothing else. This is the finding that reorganised the
-application: Gutenbird's entire reading path streamed `text/plain` in `Range`
-chunks so the first page appeared in about a second, and OPDS does not offer
-it that text. It offers something better instead. See [Reading](#reading).
+reading path: it used to stream `text/plain` in `Range` chunks so the first
+page appeared in about a second, and OPDS does not offer that text. It offers
+something better instead. See [Reading](#reading).
 
 ### Standard Ebooks — behind a donation
 
@@ -107,7 +108,7 @@ Two things about it are worth knowing before trusting it with a reader's tap:
 on the root feed, 8 carry an open-access acquisition link; the rest are
 Internet Archive loans, which advertise their requirement honestly through
 `properties.authenticate` pointing at an
-`application/opds-authentication+json` document. Gutenbird says a book is
+`application/opds-authentication+json` document. The client says a book is
 borrow-only rather than offering a download that cannot work.
 
 **Its open-access links are broken as published.** Switching to the Open Access
@@ -167,18 +168,17 @@ way a missing button is.
 
 ## The shape of the client
 
-Three new pieces, each of which is useful on its own.
+Two new pieces, each of which is useful on its own.
 
 ### `kobo-xml`
 
-The Atom scanner that lived inside the Feeds application, promoted to a crate.
-It was always general: a pull scanner over elements, attributes and text, with
-the five XML entities and numeric references decoded, a depth cap so a
-malicious document cannot make it grow, and a policy of stopping at the first
+The Atom scanner that grew inside a feed-reading application, promoted to a
+crate. It was always general: a pull scanner over elements, attributes and
+text, with the five XML entities and numeric references decoded, a depth cap so
+a malicious document cannot make it grow, and a policy of stopping at the first
 thing it cannot parse rather than guessing — because a feed truncated by a
 proxy is far more common than one that is subtly wrong, and half a feed is a
-useful answer. OPDS 1.2 is Atom, so it needs exactly this. Feeds keeps
-working through it, unchanged.
+useful answer. OPDS 1.2 is Atom, so it needs exactly this.
 
 ### `kobo-opds`
 
@@ -213,12 +213,6 @@ Version is decided by sniffing the response rather than trusting anything: a
 body whose first non-space byte is `{` is 2.0 and `<` is 1.x. The `Accept`
 header asks for JSON, but a server that ignores it — which is most of them —
 gets understood anyway.
-
-### Gutenbird
-
-The same application it was. A shelf of covers, a book, a reader. What changed
-is that the shelf is now whatever catalog is pointed at, and there is a screen
-for choosing between them.
 
 ## Search
 

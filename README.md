@@ -12,13 +12,6 @@ After one USB installation, users can install, update, and remove signed apps
 over Wi-Fi. App releases are independent from Cobalt platform releases, so a
 new app can appear in Store without reinstalling or updating Cobalt.
 
-<p align="center">
-  <a href="docs/cobalt-tour.mp4">
-    <img src="docs/tour.gif" height="600" alt="A real Kobo Clara BW running Audiobook Studio, Gutenbird, Terminal, Components, Hacker News, Sidekick, AI Command Center, Feeds, Tic-tac-toe and audio playback, followed by the full App Store catalog and Sudoku being installed, played, removed and reinstalled over Wi-Fi">
-  </a><br>
-  <sub>Recorded on a Kobo Clara BW at 3× speed: apps, Store discovery, and the complete Sudoku install lifecycle.</sub>
-</p>
-
 > [!IMPORTANT]
 > The **Kobo Clara BW N365 (device code 391)** and **Kobo Elipsa 2E N605
 > (device code 389)** are fully hardware-tested on the exact firmware and
@@ -49,36 +42,11 @@ utilities.
 <tr>
 <td width="33%" valign="top"><a href="examples/launcher/README.md"><img width="230" src="examples/launcher/screenshots/home.png" alt="Cobalt launcher showing a grid of applications"></a><br><b><a href="examples/launcher/README.md">Launcher</a></b><br>Opens installed apps and always keeps a route back to the Kobo reader.</td>
 <td width="33%" valign="top"><a href="docs/APP_STORE.md"><img width="230" src="examples/store/screenshots/catalog.png" alt="Cobalt App Store listing installed and available applications"></a><br><b><a href="docs/APP_STORE.md">App Store</a></b><br>Browses signed apps and installs, updates, removes, and reinstalls them over Wi-Fi.</td>
-<td width="33%" valign="top"><a href="apps/sudoku/"><img width="230" src="apps/sudoku/screenshots/game.png" alt="A complete 81-cell Sudoku game on a Kobo Clara BW"></a><br><b><a href="apps/sudoku/">Sudoku</a></b><br>A Store-only touch game that also proves delivery of an app absent from the platform package.</td>
-</tr>
-<tr>
-<td valign="top"><a href="examples/audiobook/README.md"><img width="230" src="examples/audiobook/screenshots/player.png" alt="An audiobook player with cover art, position and transport controls"></a><br><b><a href="examples/audiobook/README.md">Audiobook Studio</a></b><br>Researches, writes, narrates, and plays an original audiobook.</td>
-<td valign="top"><a href="examples/gutenbird/README.md"><img width="230" src="examples/gutenbird/screenshots/shelf.png" alt="A shelf of book covers from an OPDS catalogue"></a><br><b><a href="examples/gutenbird/README.md">Gutenbird</a></b><br>Reads any OPDS library: Project Gutenberg, Standard Ebooks, Open Library, or one you add.</td>
-<td valign="top"><a href="examples/hn/README.md"><img width="230" src="examples/hn/screenshots/stories.png" alt="A ranked list of Hacker News stories"></a><br><b><a href="examples/hn/README.md">Hacker News</a></b><br>Top, New, Ask, and Show stories with complete comment threads.</td>
-</tr>
-<tr>
-<td valign="top"><a href="examples/rss/README.md"><img width="230" src="examples/rss/screenshots/articles.png" alt="A list of subscribed feeds and articles"></a><br><b><a href="examples/rss/README.md">Feeds</a></b><br>Discovers a site's feed and presents its articles without the browser layout.</td>
-<td valign="top"><a href="examples/brief/README.md"><img width="230" src="examples/brief/screenshots/brief.png" alt="A numbered daily news brief"></a><br><b><a href="examples/brief/README.md">Daily Brief</a></b><br>Collects the day's stories while the reader is using another app.</td>
-<td valign="top"><a href="examples/chat/README.md"><img width="230" src="examples/chat/screenshots/answer.png" alt="An AI answer displayed as readable text on the panel"></a><br><b><a href="examples/chat/README.md">AI Command Center</a></b><br>Asks a question and turns the answer into touch-friendly reading.</td>
-</tr>
-<tr>
-<td valign="top"><a href="examples/sidekick/README.md"><img width="230" src="examples/sidekick/screenshots/question.png" alt="A coding agent request with tappable responses"></a><br><b><a href="examples/sidekick/README.md">Sidekick</a></b><br>Lets a reader approve or deny requests from coding agents.</td>
-<td valign="top"><a href="examples/terminal/README.md"><img width="230" src="examples/terminal/screenshots/shell.png" alt="A shell and touch keyboard on the Kobo display"></a><br><b><a href="examples/terminal/README.md">Terminal</a></b><br>A panel-native shell with keys that send input immediately.</td>
-<td valign="top"><a href="examples/gallery/README.md"><img width="230" src="examples/gallery/screenshots/text.png" alt="Cobalt typography and UI components"></a><br><b><a href="examples/gallery/README.md">Components</a></b><br>Shows the UI toolkit's controls, layouts, typography, and states.</td>
+<td width="33%" valign="top"><a href="examples/terminal/README.md"><img width="230" src="examples/terminal/screenshots/shell.png" alt="A shell and touch keyboard on the Kobo display"></a><br><b><a href="examples/terminal/README.md">Terminal</a></b><br>A panel-native shell with keys that send input immediately.</td>
 </tr>
 <tr>
 <td valign="top"><a href="examples/settings/README.md"><img width="230" src="examples/settings/screenshots/battery.png" alt="Battery status and hardware facts"></a><br><b><a href="examples/settings/README.md">Settings</a></b><br>Manages connectivity and hardware, and keeps platform updates separate from Store.</td>
-<td valign="top"><a href="examples/todo/README.md"><img width="230" src="examples/todo/screenshots/list.png" alt="A persistent to-do list with completed items"></a><br><b><a href="examples/todo/README.md">Todo</a></b><br>A persistent list with touch entry and completed-item states.</td>
-<td valign="top"><a href="examples/tictactoe/README.md"><img width="230" src="examples/tictactoe/screenshots/game.png" alt="A completed game of tic-tac-toe"></a><br><b><a href="examples/tictactoe/README.md">Tic-tac-toe</a></b><br>A two-player touch game using partial refreshes for individual cells.</td>
-</tr>
-<tr>
-<td valign="top"><a href="apps/arxiv/README.md"><img width="230" src="apps/arxiv/screenshots/listing.png" alt="The newest machine learning preprints on a Kobo Clara BW, newest first"></a><br><b><a href="apps/arxiv/README.md">arXiv Reader</a></b><br>Browses and searches preprints, keeps them for offline reading, and sets their mathematics as type.</td>
-<td valign="top"><a href="apps/morse/README.md"><img width="230" src="apps/morse/screenshots/sending.png" alt="The letter S filling the panel while the beacon sends it"></a><br><b><a href="apps/morse/README.md">Morse</a></b><br>Sends a typed message on the front light, a letter at a time, drawn across the panel as it goes.</td>
-</tr>
-<tr>
-<td valign="top"><a href="examples/magnet/README.md"><img width="230" src="examples/magnet/screenshots/counting.png" alt="The Kobo hall sensor responding to a magnet"></a><br><b><a href="examples/magnet/README.md">Magnet</a></b><br>Locates the hall sensor behind the bezel and reports its changes.</td>
-<td></td>
-<td></td>
+<td valign="top"><b><a href="apps/pret-numerique/">Prêt numérique</a></b><br>Borrows and returns Montréal and BAnQ library loans, and follows each request where it was started.</td>
 </tr>
 </table>
 
@@ -121,10 +89,6 @@ shown as installed system apps and cannot be removed.
 Apps are published automatically when an app PR is merged into `main`.
 Publishing an app does **not** require changing the Cobalt version or creating
 a platform release.
-
-Sudoku remains Store-only and is intentionally absent from the USB platform
-package, so installing it verifies delivery of an app that was not already on
-the reader.
 
 ## Build an app
 
@@ -200,7 +164,7 @@ capabilities, testing, and release details.
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
-cargo run -p kobo-cli -- run --sim --app sudoku
+cargo run -p kobo-cli -- run --sim --app pret-numerique
 ```
 
 Additional guides:

@@ -2,9 +2,8 @@
 #
 # Retakes the screenshots in every example's README, on a real reader.
 #
-# The third script in the loop. `record-apps.sh` says what an application did,
-# `record-tour.sh` says what the whole system feels like, and this says what
-# each screen looks like right now.
+# The other half of the loop. `record-apps.sh` says what an application did,
+# and this says what each screen looks like right now.
 #
 # It exists because the stills went stale and nobody noticed. A typographic
 # change lands, every README still shows the old weight, and the drift is
@@ -22,16 +21,16 @@
 # Some shots cannot be taken this way and are left alone deliberately. They are
 # listed under BY_HAND below, with the reason.
 #
-# usage: scripts/shoot-apps.sh --device IP [--apps "settings todo"] [--dry-run]
+# usage: scripts/shoot-apps.sh --device IP [--apps "settings launcher"] [--dry-run]
 
 set -eu
 
 DEVICE=""
 DRY=""
-APPS="launcher settings todo tictactoe gallery terminal magnet hn rss gutenbird brief"
+APPS="launcher settings terminal"
 
 usage() {
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 
@@ -51,15 +50,11 @@ cd "$(dirname "$0")/.."
 
 # Shots that need something this script cannot arrange:
 #
-#   magnet/counting      a magnet, walked along the edge of the panel by hand
 #   settings/bluetooth   headphones that are paired, on, and in range
-#   chat/*               a conversation with a real API key behind it
-#   audiobook/*          a book that takes minutes to write and read aloud
-#   sidekick/*           an agent on the desk actually stopping to ask
 #
-# All of them are real captures of things that really happened, which is why
-# they are kept rather than regenerated as mock-ups.
-BY_HAND="magnet/counting settings/bluetooth chat audiobook sidekick"
+# A real capture of something that really happened, which is why it is kept
+# rather than regenerated as a mock-up.
+BY_HAND="settings/bluetooth"
 
 # Every point was read off a 1072x1448 panel. Back is the arrow in the top
 # left, which is the way out of any screen an application opened.
@@ -77,34 +72,11 @@ shots_for() {
         # The root list, then each pane it opens and the way back out.
         settings)
             echo "connections:2:- wifi:6:536,475 -:3:$BACK battery:4:536,700" ;;
-        # The list, then the keyboard the Add button raises. Add is the left
-        # of two buttons, so the tap goes to its half of the row.
-        todo)
-            echo "list:2:- compose:4:285,730" ;;
-        # Played to a finish. O takes the third column while X answers in the
-        # first, which is the game the README describes.
-        tictactoe)
-            echo "-:2:869,400 -:2:201,400 -:2:869,700 -:2:201,700 game:4:869,1000" ;;
-        # Two pages of the gallery: the type specimen, then the controls.
-        gallery)
-            echo "text:3:- controls:4:800,1380" ;;
         # A shell that has actually run something. The taps are the l and s
         # keys and then enter, so the listing on the panel is a real one made
         # by the reader's own /bin/sh rather than a picture of one.
         terminal)
             echo "-:3:975,1070 -:1:205,1070 shell:6:865,1330" ;;
-        # Nothing to tap, and the empty state is the whole point of it.
-        magnet)
-            echo "no-magnet:3:-" ;;
-        # A list that has to arrive over the network, then a story from it.
-        hn)
-            echo "stories:9:- thread:9:536,300" ;;
-        rss)
-            echo "articles:9:- search:5:400,1380" ;;
-        gutenbird)
-            echo "shelf:10:- book:8:201,400" ;;
-        brief)
-            echo "brief:12:-" ;;
         *)
             echo "" ;;
     esac

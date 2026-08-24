@@ -17,11 +17,9 @@ Store apps are workspace packages declared in `apps/catalog.json`. The
 registry supplies public metadata; binary size and SHA-256 are calculated from
 the exact ARM release binary during publishing.
 
-The initial Cobalt applications are registered too. Their `0.2.0` copies are
-bundled for a useful first boot, appear as installed in Store, and can later be
-updated, removed, or reinstalled through the same signed channel. Sudoku is
-not in the platform package, so installing it proves that Wi-Fi delivery works
-for an app absent from the reader.
+An app that is also bundled in the platform package appears as installed in
+Store and can later be updated, removed, or reinstalled through the same signed
+channel.
 
 See [CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md) for the contribution format.
 

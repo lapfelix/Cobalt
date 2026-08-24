@@ -1,7 +1,8 @@
 # kobo-sidekickd
 
-The daemon half of [Sidekick](../../examples/sidekick): a coding agent's
-permission prompt, relayed to a Kobo.
+A coding agent's permission prompt, relayed to a Kobo. This is the host half;
+the reader half is an ordinary Cobalt application written against `kobo-sdk`
+and is not in this workspace.
 
 Claude Code and Codex both stop mid-task to ask "may I run this?", and both
 have hook systems that let a command answer instead of the keyboard. This

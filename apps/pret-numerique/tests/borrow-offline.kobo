@@ -1,0 +1,17 @@
+# A borrow is the one request that is never retried for the reader, so the
+# offline answer to POST /jobs has to say plainly that nothing happened. The
+# search runs first, then the network is taken away before the tap that borrows.
+clean
+tap Title, author, or ISBN
+type dune
+tap Search
+wait-for Results
+tap Dune
+wait-for Book details
+scenario offline
+tap Montréal
+wait-for not on a network
+expect nothing was borrowed
+expect Book details
+clean
+scenario normal

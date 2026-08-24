@@ -2,7 +2,8 @@
 //! and (in the wild, though never standardised) `media` namespaces.
 //!
 //! This is built on [`kobo_xml`]'s flat event scanner rather than a tree, the
-//! same way `examples/rss`'s feed reader is, and for the same reason: the
+//! same way the feed reader the scanner grew out of is, and for the same
+//! reason: the
 //! documents here are written by strangers and served by machines nobody in
 //! this workspace controls, and the scanner's policy of stopping at the first
 //! thing it cannot make sense of — rather than guessing — is exactly the
@@ -87,7 +88,7 @@ pub(crate) fn parse(input: &str, base: &str) -> Feed {
 /// Materialising every event before walking them (rather than driving the
 /// walk from inside [`kobo_xml::scan`]'s callback) is what lets this module
 /// be written as ordinary recursive-descent functions that call
-/// `cursor.next()` — the same trade `examples/rss` makes, for the same
+/// `cursor.next()` — the same trade the feed reader makes, for the same
 /// reason: OPDS nests price and indirect-acquisition inside a link inside an
 /// entry, and a callback-driven walk would need its own explicit stack to
 /// track that context, which is just this struct with extra steps.
@@ -156,7 +157,7 @@ fn read_text(cursor: &mut Cursor<'_>) -> String {
 }
 
 /// Elements after which prose reduced from real markup gets a paragraph
-/// break — the same list `examples/rss` uses for Atom `type="xhtml"` content,
+/// break — the same list a feed reader needs for Atom `type="xhtml"` content,
 /// because it is the same problem: without it, a five-paragraph book summary
 /// arrives as one paragraph.
 const BREAKS_LINE: [&str; 8] = ["p", "br", "div", "li", "h1", "h2", "h3", "blockquote"];
@@ -253,8 +254,8 @@ fn collapse_blank_lines(text: &str) -> String {
 /// Kept as two optional slots that are reconciled once the entry is
 /// complete, rather than compared incrementally, because `content` beats
 /// `summary` regardless of which order the two arrive in — the same
-/// "full text wins whichever order it arrives in" property `examples/rss`
-/// tests for its own summary/content handling.
+/// "full text wins whichever order it arrives in" property a feed reader
+/// needs for its own summary/content handling.
 fn read_prose(cursor: &mut Cursor<'_>, attributes: &str) -> String {
     let kind = attr_local(attributes, "type").unwrap_or_default();
     if kind.eq_ignore_ascii_case("xhtml") {

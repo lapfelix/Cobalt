@@ -7,7 +7,7 @@ application and photographs what it drew. Part of [Cobalt](../README.md).
 cargo test --workspace --all-features
 cargo run -p kobo-cli -- dev --builtin      # browser simulator
 cargo run -p kobo-cli -- run --sim          # the real runtime, host socket
-cargo run -p kobo-cli -- run --sim --app rss   # ... pointed at one application
+cargo run -p kobo-cli -- run --sim --app pret-numerique   # ... pointed at one application
 ```
 
 `run --sim` starts the real `kobod`, runs one application against it over a
@@ -22,9 +22,13 @@ Clara BW 391 profile: 1072 × 1448 at 300 PPI, including its rotated raw touch
 coordinates. It uses the same renderer, layout engine, policy, typeface and
 panel refresh planner as the device, so a screen that fits in the browser fits
 on the panel and the reported changed rectangle, waveform and clean-refresh
-cadence cannot drift from the runtime. The inspector can compare ideal pixels
-with a clearly labelled approximation of E Ink residue and outline the next
-refresh region.
+cadence cannot drift from the runtime. The one place they do differ is on top of
+the planner: the device runtime downgrades a keystroke inside an on-screen
+keyboard to the two-level waveform, and upgrades a keyboard changing layer or
+closing to a clearing one. The simulator shows what the planner chose, because
+neither the speed nor the residue those overrides trade against exists on an
+LCD. The inspector can compare ideal pixels with a clearly labelled
+approximation of E Ink residue and outline the next refresh region.
 
 Network requests and terminals are real. The inspector's deterministic
 scenarios exercise offline, low-battery, denied-permission, missing-secret,
