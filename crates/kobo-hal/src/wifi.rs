@@ -2,10 +2,16 @@
 //!
 //! This module never starts a second supplicant. Nickel and Cobalt would then
 //! be two owners of one interface, an arrangement already proven unsafe on the
-//! Clara BW. The backend is available only when the firmware's `wpa_cli` and
-//! `wlan0` are both present; all operations go through that existing owner.
+//! Clara BW. The backend is available only when the firmware's `wpa_cli` and a
+//! wireless station interface are both present; all operations go through that
+//! existing owner.
+//!
+//! Which interface that is comes from [`crate::network::wireless_link`] rather
+//! than from a name written here, and detecting it changes nothing about the
+//! doctrine above: it reads the supplicant the firmware is already running, it
+//! does not replace it.
 
-use crate::network::{signal_dbm, WIRELESS_LINK};
+use crate::network::{signal_dbm, wireless_link, NET_CLASS};
 use kobo_protocol::{DeviceError, DeviceResult, WifiNetwork, MAX_RADIO_DEVICES};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,20 +31,20 @@ const WPA_TOOLS: [&str; 4] = [
 #[derive(Clone, Debug)]
 pub struct Wifi {
     wpa_cli: PathBuf,
+    link: &'static str,
 }
 
 impl Wifi {
     #[must_use]
     pub fn open() -> Option<Self> {
-        if !Path::new("/sys/class/net/wlan0").exists() {
-            return None;
-        }
+        let link = wireless_link()?;
         WPA_TOOLS
             .into_iter()
             .map(Path::new)
             .find(|path| path.is_file())
             .map(|path| Self {
                 wpa_cli: path.to_path_buf(),
+                link,
             })
     }
 
@@ -51,7 +57,7 @@ impl Wifi {
         let completed = value(&status, "wpa_state").is_some_and(|state| state == "COMPLETED");
         DeviceResult::Wifi {
             available: true,
-            enabled: interface_enabled(),
+            enabled: interface_enabled(self.link),
             connected_ssid: completed
                 .then(|| value(&status, "ssid").unwrap_or_default().to_owned()),
             networks: Vec::new(),
@@ -61,7 +67,7 @@ impl Wifi {
     #[must_use]
     pub fn set_enabled(&self, enabled: bool) -> DeviceResult {
         if enabled {
-            if !set_interface(true) {
+            if !set_interface(self.link, true) {
                 return DeviceResult::Failed(DeviceError::Backend);
             }
             if let Err(error) = self.command(["reconnect"]) {
@@ -71,7 +77,7 @@ impl Wifi {
             if let Err(error) = self.command(["disconnect"]) {
                 return DeviceResult::Failed(error);
             }
-            if !set_interface(false) {
+            if !set_interface(self.link, false) {
                 return DeviceResult::Failed(DeviceError::Backend);
             }
         }
@@ -91,9 +97,9 @@ impl Wifi {
         let connected = value(&status, "ssid");
         DeviceResult::Wifi {
             available: true,
-            enabled: interface_enabled(),
+            enabled: interface_enabled(self.link),
             connected_ssid: connected.map(str::to_owned),
-            networks: parse_scan_results(&results, connected),
+            networks: parse_scan_results(&results, connected, self.link),
         }
     }
 
@@ -102,7 +108,7 @@ impl Wifi {
         if !valid_credentials(ssid, password) {
             return DeviceResult::Failed(DeviceError::InvalidInput);
         }
-        if !set_interface(true) {
+        if !set_interface(self.link, true) {
             return DeviceResult::Failed(DeviceError::Backend);
         }
         let network = match self.command(["add_network"]).and_then(|output| {
@@ -148,7 +154,7 @@ impl Wifi {
 
     fn command<const N: usize>(&self, arguments: [&str; N]) -> Result<String, DeviceError> {
         let output = Command::new(&self.wpa_cli)
-            .args(["-i", WIRELESS_LINK])
+            .args(["-i", self.link])
             .args(arguments)
             .output()
             .map_err(|_| DeviceError::Backend)?;
@@ -166,7 +172,7 @@ impl Wifi {
     /// process inspecting `/proc/*/cmdline` cannot read the password.
     fn script(&self, commands: &str) -> Result<String, DeviceError> {
         let mut child = Command::new(&self.wpa_cli)
-            .args(["-i", WIRELESS_LINK])
+            .args(["-i", self.link])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -190,22 +196,22 @@ impl Wifi {
     }
 }
 
-fn interface_enabled() -> bool {
-    if let Ok(flags) = std::fs::read_to_string("/sys/class/net/wlan0/flags") {
+fn interface_enabled(link: &str) -> bool {
+    let interface = Path::new(NET_CLASS).join(link);
+    if let Ok(flags) = std::fs::read_to_string(interface.join("flags")) {
         return u32::from_str_radix(flags.trim().trim_start_matches("0x"), 16)
             .is_ok_and(|flags| flags & 1 != 0);
     }
-    std::fs::read_to_string("/sys/class/net/wlan0/operstate")
-        .is_ok_and(|state| state.trim() != "down")
+    std::fs::read_to_string(interface.join("operstate")).is_ok_and(|state| state.trim() != "down")
 }
 
-fn set_interface(enabled: bool) -> bool {
+fn set_interface(link: &str, enabled: bool) -> bool {
     let state = if enabled { "up" } else { "down" };
     for (tool, arguments) in [
-        ("/sbin/ip", vec!["link", "set", WIRELESS_LINK, state]),
-        ("/bin/ip", vec!["link", "set", WIRELESS_LINK, state]),
-        ("/sbin/ifconfig", vec![WIRELESS_LINK, state]),
-        ("/bin/ifconfig", vec![WIRELESS_LINK, state]),
+        ("/sbin/ip", vec!["link", "set", link, state]),
+        ("/bin/ip", vec!["link", "set", link, state]),
+        ("/sbin/ifconfig", vec![link, state]),
+        ("/bin/ifconfig", vec![link, state]),
     ] {
         if Path::new(tool).is_file()
             && Command::new(tool)
@@ -219,7 +225,7 @@ fn set_interface(enabled: bool) -> bool {
     false
 }
 
-fn parse_scan_results(output: &str, connected: Option<&str>) -> Vec<WifiNetwork> {
+fn parse_scan_results(output: &str, connected: Option<&str>, link: &str) -> Vec<WifiNetwork> {
     let mut networks = Vec::new();
     for line in output
         .lines()
@@ -237,7 +243,7 @@ fn parse_scan_results(output: &str, connected: Option<&str>) -> Vec<WifiNetwork>
         let signal_dbm = fields[2]
             .parse::<i16>()
             .ok()
-            .or_else(|| signal_dbm(WIRELESS_LINK).and_then(|value| i16::try_from(value).ok()))
+            .or_else(|| signal_dbm(link).and_then(|value| i16::try_from(value).ok()))
             .unwrap_or(-100);
         let flags = fields[3];
         if let Some(existing) = networks
@@ -299,7 +305,7 @@ mod tests {
                     aa\t2412\t-70\t[WPA2-PSK-CCMP][ESS]\tHome\n\
                     bb\t5180\t-42\t[WPA2-PSK-CCMP][ESS]\tHome\n\
                     cc\t2412\t-55\t[ESS]\tCafe\n";
-        let networks = parse_scan_results(scan, Some("Home"));
+        let networks = parse_scan_results(scan, Some("Home"), "wlan0");
         assert_eq!(networks.len(), 2);
         assert_eq!(networks[0].ssid, "Home");
         assert_eq!(networks[0].signal_dbm, -42);

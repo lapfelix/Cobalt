@@ -577,7 +577,7 @@ fn watchdog_script(
     )
 }
 
-fn read_argv(proc_root: &Path, pid: i32) -> Option<Vec<String>> {
+pub(crate) fn read_argv(proc_root: &Path, pid: i32) -> Option<Vec<String>> {
     let bytes = fs::read(proc_root.join(pid.to_string()).join("cmdline")).ok()?;
     let argv = bytes
         .split(|byte| *byte == 0)

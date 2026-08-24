@@ -190,9 +190,6 @@ const POLL_FOR_STOP: Duration = Duration::from_millis(100);
 /// inside half a minute, so nothing is lost.
 const BATTERY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The wireless interface every Kobo names the same thing.
-const WIFI_LINK: &str = "wlan0";
-
 /// How often the band is re-read.
 ///
 /// Separate from how often it is allowed to *change*, which is the mistake
@@ -330,13 +327,15 @@ fn read_status() -> kobo_ui::Status {
         // A radio with no default route is not a usable connection however
         // strong the association is, so reachability is checked before
         // strength. Showing three arcs on a device that cannot load a page is
-        // the one thing this mark must never do.
-        signal: if kobo_hal::network::is_online(WIFI_LINK) {
-            kobo_hal::network::signal_dbm(WIFI_LINK)
-                .map_or(kobo_ui::Signal::Weak, kobo_ui::Signal::from_dbm)
-        } else {
-            kobo_ui::Signal::Off
-        },
+        // the one thing this mark must never do. The interface is whichever one
+        // the HAL detected, because a name assumed here read as no signal at
+        // all on a device that calls its station something else.
+        signal: kobo_hal::network::wireless_link()
+            .filter(|link| kobo_hal::network::is_online(link))
+            .map_or(kobo_ui::Signal::Off, |link| {
+                kobo_hal::network::signal_dbm(link)
+                    .map_or(kobo_ui::Signal::Weak, kobo_ui::Signal::from_dbm)
+            }),
         battery: battery.map(|battery| kobo_ui::Percent::new(battery.percent)),
         charging: battery.is_some_and(|battery| battery.charging),
         // Filled in by the caller, which is the only layer holding what the
