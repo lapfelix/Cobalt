@@ -16,7 +16,10 @@
 //! E Ink does not scroll, so every long list is paged with buttons, and how
 //! many rows a page holds comes from the panel the runtime says it is drawing
 //! to. Whether a browse has another page is the server's answer rather than a
-//! count of the rows in hand.
+//! count of the rows in hand. A book's description is paged the same way, but
+//! where its pages break is measured against the panel: prose is not rows, and
+//! a page of one long paragraph holds half again what a page of short ones
+//! does.
 
 use kobo_json::{ObjectBuilder, Value};
 use kobo_sdk::keyboard::{TextEntry, Typing};
@@ -31,7 +34,15 @@ const API_SECRET: &str = "pret-numerique-api";
 const STORE_STATE: &str = "ui-state";
 const MAX_RESULTS: usize = 40;
 const MAX_QUERY_CHARS: usize = 80;
-const MAX_DETAIL_DESCRIPTION_CHARS: usize = 130;
+const MAX_DETAIL_DESCRIPTION_CHARS: usize = 88;
+/// The whole of a blurb, kept because there is now a screen that shows it.
+///
+/// The libraries' longest runs to a little under 3,900 characters, so this
+/// holds every one of them with room to spare. It was 720, which is the median
+/// and was the right bound while a book's screen only ever showed a teaser: it
+/// cut two thirds off the longest descriptions before anything could page
+/// through them.
+const MAX_DESCRIPTION_CHARS: usize = 4000;
 const MAX_ERROR_CHARS: usize = 160;
 const MAX_JOBS: usize = 24;
 const POLL_SECONDS: u32 = 2;
@@ -52,6 +63,29 @@ const MIN_PAGE_ROWS: usize = 3;
 /// counting them as whole ones would cost Library half its page.
 const SECTION_COST: i32 = 42;
 const LINE_COST: i32 = 42;
+/// What a definition list charges for one fact, what a book's screen has spent
+/// before the first of them, and what one library's row under them costs.
+///
+/// The furniture is the book's title and the section and line that offer the
+/// libraries: everything a borrow needs and none of it optional. A library's own
+/// row is charged separately because how many there are is the book's business,
+/// and it is cheaper than [`PAGE_ROW_STRIDE`] -- a row carrying a library's name
+/// and four words under it sits at a row's floor, where a list of book titles is
+/// a list of two-line ones. Measured against the real typeface like the page
+/// numbers above, and held to it by the layout tests.
+const FACT_COST: i32 = 58;
+const DETAIL_FURNITURE: i32 = 268;
+const LIBRARY_ROW_COST: i32 = 153;
+/// The facts a book's screen keeps whatever the panel: who wrote it, and which
+/// library has a copy. Nothing about a borrow makes sense without both.
+const MIN_DETAIL_FACTS: usize = 2;
+/// What a banner costs the page of prose under it.
+///
+/// Four lines of it, which is what the longest thing this app has to say about
+/// a request that failed comes to on the narrowest panel. A page measured as
+/// though nothing were ever wrong loses its last lines the first time
+/// something is, and the reader has no way to tell that it did.
+const NOTE_COST: i32 = 4 * LINE_COST + 40;
 
 const MAX_PAGE_ROWS: usize = 8;
 /// How many of the libraries' lists Discover draws at once.
@@ -75,6 +109,7 @@ const CATEGORIES: &str = "open-categories";
 const HOLDS: &str = "open-holds";
 const SHOW_PDF: &str = "show-pdf";
 const RELATED: &str = "open-related";
+const DESCRIPTION: &str = "open-description";
 const PREVIOUS_PAGE: &str = "previous-page";
 const NEXT_PAGE: &str = "next-page";
 const EDIT_QUERY: &str = "edit-query";
@@ -103,6 +138,8 @@ enum View {
     Search,
     Results,
     Detail,
+    /// One book's blurb with the panel to itself, paged like any other list.
+    Description,
     Related,
     Library,
     Holds,
@@ -175,6 +212,18 @@ struct Publication {
     authors: Vec<String>,
     isbn: Option<String>,
     description: Option<String>,
+    /// When the edition came out, as the server normalised it.
+    ///
+    /// Each of these four is absent often enough that the screen has to read as
+    /// though it were never coming: a fifth of the books have no page count, an
+    /// audiobook has one about never, and a book has a listening time about
+    /// never. So each is drawn only where there is something to draw, and a
+    /// missing one costs no row rather than a row saying nothing.
+    published: Option<String>,
+    number_of_pages: Option<i64>,
+    publisher: Option<String>,
+    /// How long an audiobook runs, in seconds.
+    duration: Option<i64>,
     goodreads_rating: Option<f64>,
     goodreads_ratings_count: Option<i64>,
     goodreads_reviews_count: Option<i64>,
@@ -407,6 +456,12 @@ struct PretNumerique {
     related: Vec<Publication>,
     related_page: usize,
     detail: Option<Publication>,
+    /// Which page of the open book's blurb is showing.
+    ///
+    /// Not kept on the trail. A `Place` carries the book, so coming back to a
+    /// blurb is coming back to its first page, which is where a reader who
+    /// left it and returned to it means to start.
+    description_page: usize,
     selected_source: usize,
     books: Vec<Book>,
     books_page: usize,
@@ -419,8 +474,13 @@ struct PretNumerique {
     inflight: Option<(TaskId, RequestKind)>,
     queued_request: Option<RequestKind>,
     sleep_task: Option<TaskId>,
-    /// How tall the panel's content area is, learned from the runtime.
-    content_height: i32,
+    /// The panel this app is drawing to, learned from the runtime.
+    ///
+    /// Kept whole rather than as a content height, because a blurb is broken
+    /// into pages by measuring it and where the folds land depends on how wide
+    /// the panel sets a line as well as how much of it there is. Everything
+    /// else asks it only for [`Self::content_height`].
+    metrics: kobo_sdk::DisplayMetrics,
     note: Option<String>,
     health: Option<String>,
     health_advice: Option<String>,
@@ -452,6 +512,7 @@ impl Default for PretNumerique {
             related: Vec::new(),
             related_page: 0,
             detail: None,
+            description_page: 0,
             selected_source: 0,
             books: Vec::new(),
             books_page: 0,
@@ -464,7 +525,7 @@ impl Default for PretNumerique {
             inflight: None,
             queued_request: None,
             sleep_task: None,
-            content_height: kobo_sdk::CLARA_BW_METRICS.prose_area(true, true).height,
+            metrics: kobo_sdk::CLARA_BW_METRICS,
             note: None,
             health: None,
             health_advice: None,
@@ -514,6 +575,7 @@ impl PretNumerique {
             View::Search => self.search_screen(),
             View::Results => self.results_screen(),
             View::Detail => self.detail_screen(),
+            View::Description => self.description_screen(),
             View::Related => self.related_screen(),
             View::Library => self.library_screen(),
             View::Holds => self.holds_screen(),
@@ -535,11 +597,12 @@ impl PretNumerique {
     /// bar slot is a quarter of the panel and "Return to Kobo reader" set
     /// across it is a sentence where two words will do.
     ///
-    /// It stays four slots although there are now nine screens. The bar drops
-    /// destinations it cannot give a finger's width to, so a fifth slot on the
-    /// narrowest panel would silently take the way out with it. Finding a book
-    /// is one place -- Discover, Search, a category, an author, a book -- and
-    /// Search is reached from Discover's own bar, where the reader already is.
+    /// It stays four slots although there are more than a dozen screens. The
+    /// bar drops destinations it cannot give a finger's width to, so a fifth
+    /// slot on the narrowest panel would silently take the way out with it.
+    /// Finding a book is one place -- Discover, Search, a category, an author,
+    /// a book, its blurb -- and Search is reached from Discover's own bar,
+    /// where the reader already is.
     fn nav(screen: ScreenBuilder, selected: usize) -> ScreenBuilder {
         screen.nav_bar(
             Some(selected),
@@ -946,28 +1009,7 @@ impl PretNumerique {
         // A borrow that was never sent reports itself here, and the panel drops
         // whatever runs past the bottom without saying so.
         screen = self.note_block(self.watch_block(screen), BannerLevel::Attention);
-        let rating = result.goodreads_rating.map(|rating| {
-            let ratings = result.goodreads_ratings_count.map_or_else(
-                || "ratings not counted".to_owned(),
-                |count| format!("{} ratings", count_label(count)),
-            );
-            format!("{rating:.1} / 5 · {ratings}")
-        });
-        screen = screen.facts(
-            [
-                ("Author", Some(author_line(&result.authors))),
-                ("Copies", Some(availability_summary(result))),
-                ("Goodreads", rating),
-                (
-                    "Format",
-                    result
-                        .pdf_only
-                        .then(|| "PDF only, hard to read here".to_owned()),
-                ),
-            ]
-            .into_iter()
-            .filter_map(|(label, value)| value.map(|value| (label, value))),
-        );
+        screen = screen.facts(self.detail_facts(result));
         // The tap is the borrow, so the row has to say so before it is taken.
         // A hold is offered in its place only when no library has a copy: while
         // one of them does, the book is available and joining a queue for it
@@ -1025,11 +1067,94 @@ impl PretNumerique {
                 );
             }
         }
+        // The opening of the blurb, and the way into the rest of it. A row
+        // rather than the paragraph this was, because a description runs to
+        // thousands of characters and a book's screen has room for two lines of
+        // them: what it can honestly offer is a taste and a tap.
         if let Some(description) = result.description.as_ref().filter(|_| slots >= 2) {
-            screen = screen
-                .section("About this book")
-                .text(compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS));
+            screen = screen.section_rows(
+                "About this book",
+                None,
+                [(
+                    DESCRIPTION.to_owned(),
+                    compact_message(description, MAX_DETAIL_DESCRIPTION_CHARS),
+                    "Read the whole description".to_owned(),
+                    Glyph::Book,
+                )],
+            );
         }
+        screen.build()
+    }
+
+    /// What a book's screen says about the book, in the order it is worth
+    /// saying, cut to what the panel holds.
+    ///
+    /// The order is the whole of the design here, because a six inch panel has
+    /// room for three of these and the rest are dropped. The author and where a
+    /// copy is are what a borrow cannot be made without. A PDF warning comes
+    /// next, since it is the one fact that changes the answer. Then what a
+    /// reader chooses on: whether other people liked it, and how much of it
+    /// there is -- which for an audiobook is the fact the reader most wants.
+    /// Then the edition, which is the part nobody has ever decided a borrow on.
+    ///
+    /// Cut from the end rather than drawn in full: what the layout engine does
+    /// with a publisher's name that does not fit is drop the library button
+    /// under it, and say nothing.
+    fn detail_facts(&self, book: &Publication) -> Vec<(&'static str, String)> {
+        let rating = book.goodreads_rating.map(|rating| {
+            let ratings = book.goodreads_ratings_count.map_or_else(
+                || "ratings not counted".to_owned(),
+                |count| format!("{} ratings", count_label(count)),
+            );
+            format!("{rating:.1} / 5 · {ratings}")
+        });
+        [
+            ("Author", Some(author_line(&book.authors))),
+            ("Copies", Some(availability_summary(book))),
+            (
+                "Format",
+                book.pdf_only
+                    .then(|| "PDF only, hard to read here".to_owned()),
+            ),
+            ("Goodreads", rating),
+            ("Length", length_label(book)),
+            (
+                "Published",
+                book.published.as_deref().and_then(published_label),
+            ),
+            ("Publisher", book.publisher.clone()),
+        ]
+        .into_iter()
+        .filter_map(|(label, value)| value.map(|value| (label, value)))
+        .take(self.detail_fact_rows(book.sources.len()))
+        .collect()
+    }
+
+    /// One book's blurb, with the panel to itself.
+    ///
+    /// No heading of its own. The bar already says what this is, and a title
+    /// set across two lines above the words costs a fifth of what there is to
+    /// read them in.
+    fn description_screen(&self) -> Screen {
+        let pages = self.description_pages();
+        let mut screen = Self::nav(
+            ScreenBuilder::new("description")
+                .top_bar("About this book")
+                .top_bar_action(BACK, "Back"),
+            0,
+        );
+        screen = self.note_block(screen, BannerLevel::Attention);
+        let showing = self.description_page.min(pages.len().saturating_sub(1));
+        let Some(page) = pages.get(showing) else {
+            return screen
+                .empty_state("Neither library describes this book.")
+                .build();
+        };
+        // Asked for its first page, because the paragraphs handed over are
+        // already the page: this screen decides where the folds are, since only
+        // it knows what the controls under them cost.
+        screen = screen.paged_list(0, page.clone());
+        screen = Self::page_controls(screen, Paging::sized(showing, pages.len(), 1));
         screen.build()
     }
 
@@ -1248,9 +1373,14 @@ impl PretNumerique {
         u8::try_from(self.page_rows()).unwrap_or(3)
     }
 
+    /// How tall this panel's content area is.
+    fn content_height(&self) -> i32 {
+        self.metrics.prose_area(true, true).height
+    }
+
     /// How many rows of a list this panel holds on one page.
     fn page_rows(&self) -> usize {
-        let rows = (self.content_height - PAGE_FURNITURE) / PAGE_ROW_STRIDE;
+        let rows = (self.content_height() - PAGE_FURNITURE) / PAGE_ROW_STRIDE;
         usize::try_from(rows)
             .unwrap_or(MIN_PAGE_ROWS)
             .clamp(MIN_PAGE_ROWS, MAX_PAGE_ROWS)
@@ -1277,11 +1407,63 @@ impl PretNumerique {
                 .is_some_and(|watch| watch.view == View::Detail);
         if busy {
             0
-        } else if self.content_height >= TALL_PANEL {
+        } else if self.content_height() >= TALL_PANEL {
             2
         } else {
             1
         }
+    }
+
+    /// How many facts fit between a book's title and the libraries under it.
+    ///
+    /// What is left of the panel after the ways on from the book, the section
+    /// that offers the libraries and a row for each of them, at the cost a
+    /// definition list charges for a line. The block grew from four entries to
+    /// seven when the server started sending the edition, and seven of them on
+    /// a six inch panel is the borrow button pushed off the bottom.
+    ///
+    /// The libraries are counted rather than assumed, because their rows are
+    /// half of what the screen spends: a book only one library carries has room
+    /// for five facts where a book both of them carry has room for three.
+    fn detail_fact_rows(&self, libraries: usize) -> usize {
+        let extras = i32::try_from(self.detail_extras()).unwrap_or(0);
+        let libraries = i32::try_from(libraries).unwrap_or(2).max(1);
+        let room = self.content_height()
+            - DETAIL_FURNITURE
+            - libraries * LIBRARY_ROW_COST
+            - extras * (SECTION_COST + PAGE_ROW_STRIDE);
+        usize::try_from(room / FACT_COST)
+            .unwrap_or(MIN_DETAIL_FACTS)
+            .max(MIN_DETAIL_FACTS)
+    }
+
+    /// Where the folds fall in the open book's blurb.
+    ///
+    /// Measured against the panel rather than counted in characters, because a
+    /// page of one long paragraph holds half again what a page of short ones
+    /// does. The room is the content area less what this screen puts under the
+    /// words: the strip the runtime keeps for the clock, the line that says
+    /// which page this is, and the band that turns it. Measuring without those
+    /// comes back a page too full, and the layout engine drops the overflow in
+    /// silence.
+    fn description_pages(&self) -> Vec<Vec<String>> {
+        let Some(description) = self
+            .detail
+            .as_ref()
+            .and_then(|book| book.description.as_deref())
+        else {
+            return Vec::new();
+        };
+        let mut area = self.metrics.prose_area(true, true);
+        let mut spent = self.metrics.status_band_height()
+            + LINE_COST
+            + self.metrics.touch_target_default()
+            + 2 * area.gap;
+        if self.note.is_some() {
+            spent += NOTE_COST;
+        }
+        area.height = (area.height - spent).max(1);
+        kobo_ui::paginate(description, area)
     }
 
     /// Whether the thing this screen is for is the thing being waited on.
@@ -1342,7 +1524,7 @@ impl PretNumerique {
     /// would push the last loans off the panel on exactly the days something
     /// needs a person. The list gets what is left.
     fn library_rows_per_page(&self) -> usize {
-        let mut room = self.content_height - PAGE_FURNITURE;
+        let mut room = self.content_height() - PAGE_FURNITURE;
         let unresolved = self.unresolved_jobs().len().min(self.attention_rows());
         if unresolved > 0 {
             room -= SECTION_COST + i32::try_from(unresolved).unwrap_or(1) * PAGE_ROW_STRIDE;
@@ -2320,6 +2502,17 @@ impl PretNumerique {
                     DISCOVER_GROUPS_PER_PAGE,
                 );
             }
+            // One page of prose at a time, and the pages are worked out from the
+            // panel rather than held: the blurb is already in hand, so there is
+            // nothing to remember that measuring it again does not answer.
+            View::Description => {
+                self.description_page = turned(
+                    self.description_page,
+                    forward,
+                    self.description_pages().len(),
+                    1,
+                );
+            }
             View::Browse => {
                 self.turn_browse(context, forward);
                 return;
@@ -2366,7 +2559,7 @@ impl PretNumerique {
 
 impl KoboApp for PretNumerique {
     fn on_start(&mut self, context: &mut Context) {
-        self.content_height = context.metrics().prose_area(true, true).height;
+        self.metrics = context.metrics();
         context.store().load(STORE_STATE);
         self.start_discovery(context);
     }
@@ -2432,6 +2625,12 @@ impl KoboApp for PretNumerique {
         if action == action_id(RELATED) {
             self.deeper(context, View::Related);
             self.start_related(context);
+            return;
+        }
+        if action == action_id(DESCRIPTION) {
+            self.deeper(context, View::Description);
+            self.description_page = 0;
+            self.show(context);
             return;
         }
         if action == action_id(PREVIOUS_PAGE) {
@@ -2911,23 +3110,24 @@ fn ordinal(value: i64) -> String {
     format!("{value}{suffix}")
 }
 
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
 /// An ISO date as a reader would read it: `2026-09-11T19:06:05Z` becomes
 /// `11 September 2026`. Anything else is not a date and is not drawn.
 fn plain_date(value: &str) -> Option<String> {
-    const MONTHS: [&str; 12] = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
     let date = value.split('T').next()?;
     let mut parts = date.split('-');
     let year: u16 = parts.next()?.parse().ok()?;
@@ -2937,6 +3137,63 @@ fn plain_date(value: &str) -> Option<String> {
         return None;
     }
     Some(format!("{day} {} {year}", MONTHS[month - 1]))
+}
+
+/// When an edition came out, as a person would say it: `April 2019`, or a bare
+/// year where that is all the catalogue knows.
+///
+/// The day is dropped rather than drawn. Nobody asks which Tuesday a novel came
+/// out, and half the libraries' dates are an evening timestamp in UTC -- the
+/// previous day in this time zone -- so the day is the one part of the answer
+/// that could be wrong. That leaves the month wrong only where such a date
+/// falls on the last of one, and the server normalises them.
+///
+/// Anything that is not a date at all draws nothing: a returned `None` costs no
+/// row, where a fallback would put the server's own field on the panel.
+fn published_label(value: &str) -> Option<String> {
+    let date = value.trim().split('T').next()?;
+    let mut parts = date.split('-');
+    let year: u16 = parts.next()?.trim().parse().ok()?;
+    if !(1000..=3000).contains(&year) {
+        return None;
+    }
+    match parts
+        .next()
+        .and_then(|month| month.trim().parse::<usize>().ok())
+    {
+        Some(month) if (1..=12).contains(&month) => Some(format!("{} {year}", MONTHS[month - 1])),
+        _ => Some(year.to_string()),
+    }
+}
+
+/// How much book there is: pages for a book, hours and minutes for a recording.
+///
+/// One fact rather than two, because a title has one or the other and almost
+/// never both -- an audiobook has no page count and a book has no running time.
+/// A book that somehow has both says both, in one line.
+fn length_label(book: &Publication) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(pages) = book.number_of_pages {
+        parts.push(format!("{} pages", count_label(pages)));
+    }
+    if let Some(seconds) = book.duration {
+        parts.push(listening_time(seconds));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// A recording's length, rounded to the minute: `9 h 12 min`, or `45 min` for
+/// anything under the hour. Seconds are noise on a nine hour audiobook.
+fn listening_time(seconds: i64) -> String {
+    let minutes = (seconds + 30) / 60;
+    let hours = minutes / 60;
+    if hours == 0 {
+        return format!("{minutes} min");
+    }
+    match minutes % 60 {
+        0 => format!("{hours} h"),
+        rest => format!("{hours} h {rest} min"),
+    }
 }
 
 /// Whether two lists from two different systems are talking about one book.
@@ -3239,27 +3496,21 @@ fn publication_array(value: &Value) -> Option<&[Value]> {
     value.as_array()
 }
 
-fn parse_publication(result: &Value) -> Option<Publication> {
-    let title = result.get("title")?.as_str()?.to_owned();
-    let authors = result
-        .get("authors")
-        .and_then(Value::as_array)
-        .map(|authors| {
-            authors
-                .iter()
-                // An author is a name, or an object that has one: the browse
-                // the catalogue itself publishes is keyed on that name.
-                .filter_map(|author| {
-                    author
-                        .as_str()
-                        .or_else(|| author.get("name").and_then(Value::as_str))
-                })
-                .take(5)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    let sources: Vec<Source> = result
+/// One optional string, under either of the names it arrives as, and nothing at
+/// all when it arrives blank.
+fn text_field(value: &Value, name: &str, alternate: &str) -> Option<String> {
+    value
+        .get(name)
+        .or_else(|| value.get(alternate))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Every library's copy of one book.
+fn parse_sources(result: &Value) -> Vec<Source> {
+    result
         .get("sources")
         .and_then(Value::as_array)
         .map(|sources| {
@@ -3288,7 +3539,30 @@ fn parse_publication(result: &Value) -> Option<Publication> {
                 })
                 .collect()
         })
+        .unwrap_or_default()
+}
+
+fn parse_publication(result: &Value) -> Option<Publication> {
+    let title = result.get("title")?.as_str()?.to_owned();
+    let authors = result
+        .get("authors")
+        .and_then(Value::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                // An author is a name, or an object that has one: the browse
+                // the catalogue itself publishes is keyed on that name.
+                .filter_map(|author| {
+                    author
+                        .as_str()
+                        .or_else(|| author.get("name").and_then(Value::as_str))
+                })
+                .take(5)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
+    let sources = parse_sources(result);
     let pdf_only = result
         .get("pdf_only")
         .or_else(|| result.get("isPdfOnly"))
@@ -3325,7 +3599,32 @@ fn parse_publication(result: &Value) -> Option<Publication> {
         description: result
             .get("description")
             .and_then(Value::as_str)
-            .map(|value| compact_message(value, 720)),
+            .map(|value| compact_message(value, MAX_DESCRIPTION_CHARS)),
+        // Read under both spellings, and dropped rather than kept when there is
+        // nothing in it. A zero page count and an empty publisher are the same
+        // thing as no field at all, and a screen that draws them says "Length:
+        // 0 pages" about a book nobody counted.
+        published: text_field(result, "published", "publishedAt"),
+        number_of_pages: result
+            .get("number_of_pages")
+            .or_else(|| result.get("numberOfPages"))
+            .and_then(Value::as_i64)
+            .filter(|pages| *pages > 0),
+        publisher: text_field(result, "publisher", "publisherName").or_else(|| {
+            // The catalogue itself names a publisher as an object, the way it
+            // names an author.
+            result
+                .get("publisher")
+                .and_then(|publisher| publisher.get("name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }),
+        duration: result
+            .get("duration")
+            .and_then(Value::as_i64)
+            .filter(|seconds| *seconds > 0),
         goodreads_rating: result.get("goodreads_rating").and_then(Value::as_f64),
         goodreads_ratings_count: result
             .get("goodreads_ratings_count")
@@ -3689,11 +3988,12 @@ mod tests {
         availability_label, availability_summary, category_summary, compact_message,
         is_active_state, kind_label, ordinal, parse_books, parse_browse, parse_catalog_status_note,
         parse_categories, parse_groups, parse_health, parse_job, parse_jobs, parse_publications,
-        parse_search, parse_shelf, plain_date, publication_summary, resolve_explanation,
-        settled_message, sign_in_advice, state_label, turned, unresolved_summary, Book,
-        BrowseQuery, Category, Group, Job, Paging, PretNumerique, Publication, ShelfEntry, Sort,
-        Source, View, Watch, ACKNOWLEDGE, API, BACK, CONFIRM_RETURN, NEXT_PAGE, READER, RELATED,
-        RETRY_HOOK, SEARCH, SHOW_PDF, SUBMIT_SEARCH,
+        parse_search, parse_shelf, plain_date, publication_summary, published_label,
+        resolve_explanation, settled_message, sign_in_advice, state_label, turned,
+        unresolved_summary, Book, BrowseQuery, Category, Group, Job, Paging, PretNumerique,
+        Publication, ShelfEntry, Sort, Source, View, Watch, ACKNOWLEDGE, API, BACK, CONFIRM_RETURN,
+        DESCRIPTION, NEXT_PAGE, PREVIOUS_PAGE, READER, RELATED, RETRY_HOOK, SEARCH, SHOW_PDF,
+        SUBMIT_SEARCH,
     };
     use kobo_sdk::{
         action_id, AppRunner, BannerLevel, Command, Context, DiagnosticSeverity, KoboApp,
@@ -3713,7 +4013,9 @@ mod tests {
         }
     }
 
-    /// The read each screen is drawn waiting for.
+    /// The read each screen is drawn waiting for. A book's blurb is already in
+    /// hand by the time there is a row to open it with, so that screen is the
+    /// one that waits for nothing.
     fn waiting_for(view: View) -> Option<super::RequestKind> {
         match view {
             View::Discover => Some(super::RequestKind::Discovery),
@@ -3750,10 +4052,38 @@ mod tests {
             authors: vec!["Fixture author".to_owned()],
             isbn: Some("9780000000000".to_owned()),
             description: None,
+            published: None,
+            number_of_pages: None,
+            publisher: None,
+            duration: None,
             goodreads_rating: None,
             goodreads_ratings_count: None,
             goodreads_reviews_count: None,
             sources,
+        }
+    }
+
+    /// The same book with everything the server can say about it, and a blurb
+    /// the length of the longest the libraries publish.
+    ///
+    /// A short description proves nothing: the screen that shows one is a
+    /// screen that pages, and a blurb that fits on one page never turns.
+    fn described(book: Publication) -> Publication {
+        Publication {
+            description: Some(
+                "On the desert world Arrakis, Paul Atreides is drawn into a struggle over \
+                 power, prophecy and survival, and the spice that every house in the empire \
+                 depends on for its ships and its seers. "
+                    .repeat(9),
+            ),
+            published: Some("2019-04-02T22:00:00Z".to_owned()),
+            number_of_pages: Some(312),
+            publisher: Some("Éditions Québec Amérique".to_owned()),
+            duration: Some(33_120),
+            goodreads_rating: Some(4.29),
+            goodreads_ratings_count: Some(1_700_633),
+            goodreads_reviews_count: Some(88_668),
+            ..book
         }
     }
 
@@ -3832,16 +4162,8 @@ mod tests {
     #[test]
     fn detail_screen_bounds_long_descriptions_before_library_actions() {
         let result = Publication {
-            handle: None,
-            pdf_only: false,
-            title: "Book".to_owned(),
-            authors: vec!["Author".to_owned()],
-            isbn: None,
             description: Some("A very long description. ".repeat(40)),
-            goodreads_rating: None,
-            goodreads_ratings_count: None,
-            goodreads_reviews_count: None,
-            sources: vec![source()],
+            ..publication("Book", vec![source()])
         };
         let app = PretNumerique {
             detail: Some(result),
@@ -3851,6 +4173,231 @@ mod tests {
         assert!(screen.contains("Choose a library"));
         assert!(screen.contains("..."));
         assert!(!screen.contains(&"A very long description. ".repeat(40)));
+    }
+
+    #[test]
+    fn the_edition_is_drawn_only_where_the_server_named_one() {
+        let full = parse_search(
+            br#"{"results":[{"title":"Book","authors":["Author"],"published":"2019-04-02T22:00:00Z","number_of_pages":312,"publisher":"  Editions Quebec Amerique  ","sources":[{"handle":"opaque","catalog":"banq","catalog_name":"BAnQ","availability":"available","is_available":true}]}]}"#,
+        )
+        .expect("valid search response")
+        .remove(0);
+        assert_eq!(full.published.as_deref(), Some("2019-04-02T22:00:00Z"));
+        assert_eq!(full.number_of_pages, Some(312));
+        // Trimmed on the way in, so no screen has to think about it.
+        assert_eq!(full.publisher.as_deref(), Some("Editions Quebec Amerique"));
+        // On a panel with the room for them: a six inch one holds three facts,
+        // and which three is the business of the test below.
+        let drawn = format!(
+            "{:?}",
+            PretNumerique {
+                metrics: CONTENT_PANELS[1].1,
+                detail: Some(full),
+                ..PretNumerique::default()
+            }
+            .detail_screen()
+        );
+        assert!(drawn.contains("April 2019"), "{drawn}");
+        assert!(drawn.contains("312 pages"), "{drawn}");
+
+        // A book the catalogue counted nothing about. Every one of these is a
+        // field the server sent, and none of them is a row.
+        let bare = parse_search(
+            br#"{"results":[{"title":"Book","authors":["Author"],"published":"","number_of_pages":0,"publisher":"   ","duration":0,"sources":[{"handle":"opaque","catalog":"banq","catalog_name":"BAnQ","availability":"available","is_available":true}]}]}"#,
+        )
+        .expect("valid search response")
+        .remove(0);
+        assert_eq!(bare.published, None);
+        assert_eq!(bare.number_of_pages, None);
+        assert_eq!(bare.publisher, None);
+        assert_eq!(bare.duration, None);
+        let drawn = format!(
+            "{:?}",
+            PretNumerique {
+                detail: Some(bare),
+                ..PretNumerique::default()
+            }
+            .detail_screen()
+        );
+        for absent in ["Published", "Length", "Publisher", "0 pages"] {
+            assert!(!drawn.contains(absent), "{absent} was drawn: {drawn}");
+        }
+    }
+
+    #[test]
+    fn an_audiobook_is_measured_in_hours_and_a_book_in_pages() {
+        let listened = |seconds| {
+            format!(
+                "{:?}",
+                PretNumerique {
+                    metrics: CONTENT_PANELS[1].1,
+                    detail: Some(Publication {
+                        duration: Some(seconds),
+                        ..publication("Recording", vec![source()])
+                    }),
+                    ..PretNumerique::default()
+                }
+                .detail_screen()
+            )
+        };
+        assert!(listened(33_120).contains("9 h 12 min"));
+        assert!(listened(2_700).contains("45 min"));
+        // An exact two hours says two hours, not two hours and no minutes.
+        assert!(listened(7_200).contains("2 h\""), "{}", listened(7_200));
+        // A recording has no pages and a book has no running time, so the row
+        // that says how much of it there is never says both.
+        assert!(!listened(33_120).contains("pages"));
+    }
+
+    #[test]
+    fn a_publication_date_is_read_as_a_month_and_a_year_or_not_at_all() {
+        assert_eq!(
+            published_label("2019-04-02T22:00:00Z").as_deref(),
+            Some("April 2019")
+        );
+        assert_eq!(published_label("2019-04-02").as_deref(), Some("April 2019"));
+        // All the catalogue knew, and all that is said.
+        assert_eq!(published_label("2019").as_deref(), Some("2019"));
+        assert_eq!(published_label("2019-13-02").as_deref(), Some("2019"));
+        // Nothing that is not a date reaches the panel, whatever the server
+        // sends: no row is a better answer than a row of the server's own
+        // punctuation.
+        for wrong in ["", "soon", "n/a", "-", "0000-01-01", "20190402"] {
+            assert_eq!(published_label(wrong), None, "{wrong} was drawn as a date");
+        }
+    }
+
+    #[test]
+    fn a_book_keeps_its_author_and_its_libraries_when_the_facts_do_not_fit() {
+        typeset();
+        let book = described(publication("Book", vec![source(), out_of_copies()]));
+        let tall = PretNumerique {
+            metrics: CONTENT_PANELS[1].1,
+            detail: Some(book.clone()),
+            ..PretNumerique::default()
+        };
+        let short = PretNumerique {
+            metrics: CLARA_BW_METRICS,
+            detail: Some(book),
+            ..PretNumerique::default()
+        };
+        // A ten inch panel has room for the whole of it.
+        let drawn = format!("{:?}", tall.detail_screen());
+        for fact in ["Fixture author", "April 2019", "312 pages", "Éditions"] {
+            assert!(drawn.contains(fact), "{fact} is missing: {drawn}");
+        }
+        // A six inch panel has room for three facts, and the two that a borrow
+        // cannot be made without are the two it keeps.
+        assert_eq!(short.detail_fact_rows(2), 3);
+        assert_eq!(short.detail_fact_rows(1), 5);
+        let drawn = format!("{:?}", short.detail_screen());
+        assert!(drawn.contains("Fixture author"));
+        assert!(drawn.contains("Available now at Montréal"));
+        assert!(!drawn.contains("Éditions"), "{drawn}");
+        // What was cut was cut from the bottom, not from the middle: the
+        // control the reader came for is still on the panel.
+        assert!(drawn.contains("Choose a library"));
+        assert!(drawn.contains("Read the whole description"));
+    }
+
+    #[test]
+    fn a_blurb_too_long_for_a_book_screen_is_read_full_screen_and_paged() {
+        typeset();
+        let mut runner = AppRunner::new(PretNumerique {
+            results: vec![described(publication("Book", vec![source()]))],
+            ..PretNumerique::default()
+        });
+        runner.start();
+        runner.action(action_id("result.0"));
+        assert_eq!(runner.app().view, View::Detail);
+        runner.action(action_id(DESCRIPTION));
+        assert_eq!(runner.app().view, View::Description);
+        let drawn = format!("{:?}", runner.app().screen());
+        assert!(drawn.contains("desert world Arrakis"), "{drawn}");
+        assert!(drawn.contains("Page 1 of 2"), "{drawn}");
+        // The first page cannot go back and the last cannot go on, and both
+        // controls are drawn either way.
+        assert!(drawn.contains("Previous page"));
+        assert!(drawn.contains("Next page"));
+        runner.action(action_id(NEXT_PAGE));
+        let drawn = format!("{:?}", runner.app().screen());
+        assert!(drawn.contains("Page 2 of 2"), "{drawn}");
+        runner.action(action_id(NEXT_PAGE));
+        assert_eq!(runner.app().description_page, 1, "past the last page");
+        runner.action(action_id(PREVIOUS_PAGE));
+        assert!(format!("{:?}", runner.app().screen()).contains("Page 1 of 2"));
+        // Back is the book, not the list the book was found in.
+        runner.action(action_id(BACK));
+        assert_eq!(runner.app().view, View::Detail);
+        // And opening it again starts at the beginning of it.
+        runner.action(action_id(NEXT_PAGE));
+        runner.action(action_id(DESCRIPTION));
+        assert_eq!(runner.app().description_page, 0);
+    }
+
+    /// Every page of the longest blurb the libraries publish, on every panel.
+    ///
+    /// The screen the matrix draws is the first page, and the first page of a
+    /// paginated screen is the one that fits by construction. What can be one
+    /// line too tall is the page whose text was measured against a page area
+    /// this screen does not have, and what a panel does with that is drop the
+    /// controls that would turn it.
+    #[test]
+    fn no_page_of_a_blurb_is_drawn_past_the_bottom_of_its_panel() {
+        typeset();
+        // The longest the libraries publish, and then some.
+        let blurb = "On the desert world Arrakis, Paul Atreides is drawn into a struggle over \
+                     power, prophecy and survival, and the spice that every house in the empire \
+                     depends on for its ships and its seers. "
+            .repeat(24);
+        for (name, metrics) in CONTENT_PANELS {
+            for note in [None, Some("The home server would not take this borrow. Look in Library for anything that needs you.".to_owned())] {
+                let mut app = PretNumerique {
+                    view: View::Description,
+                    metrics,
+                    note,
+                    detail: Some(Publication {
+                        description: Some(compact_message(&blurb, super::MAX_DESCRIPTION_CHARS)),
+                        ..publication("Book", vec![source()])
+                    }),
+                    ..PretNumerique::default()
+                };
+                let pages = app.description_pages().len();
+                assert!(pages > 1, "{name}: a blurb that long has to page");
+                for page in 0..pages {
+                    app.description_page = page;
+                    let errors = app
+                        .screen()
+                        .diagnostics(&metrics, &Chrome::with_back(false))
+                        .issues
+                        .into_iter()
+                        .filter(|issue| issue.severity == DiagnosticSeverity::Error)
+                        .map(|issue| issue.to_string())
+                        .collect::<Vec<_>>();
+                    assert!(
+                        errors.is_empty(),
+                        "{name} refused page {page} of {pages}: {}",
+                        errors.join("; ")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_book_nobody_described_says_so_rather_than_drawing_an_empty_page() {
+        typeset();
+        let app = PretNumerique {
+            view: View::Description,
+            detail: Some(publication("Book", vec![source()])),
+            ..PretNumerique::default()
+        };
+        let drawn = format!("{:?}", app.screen());
+        assert!(
+            drawn.contains("Neither library describes this book"),
+            "{drawn}"
+        );
+        assert!(!drawn.contains("Page 1"), "{drawn}");
     }
 
     #[test]
@@ -4087,15 +4634,7 @@ mod tests {
     fn borrow_and_return_actions_only_post_to_the_proxy() {
         let result = Publication {
             handle: None,
-            pdf_only: false,
-            title: "Fixture title".to_owned(),
-            authors: vec!["Fixture author".to_owned()],
-            isbn: Some("9780000000000".to_owned()),
-            description: None,
-            goodreads_rating: None,
-            goodreads_ratings_count: None,
-            goodreads_reviews_count: None,
-            sources: vec![source()],
+            ..publication("Fixture title", vec![source()])
         };
         let mut borrow = AppRunner::new(PretNumerique {
             results: vec![result],
@@ -4413,13 +4952,14 @@ mod tests {
 
     /// Every screen this app can be looked at, except the one it draws on its
     /// way out and the keyboard, which carries its own Cancel.
-    const VIEWS: [View; 12] = [
+    const VIEWS: [View; 13] = [
         View::Discover,
         View::Categories,
         View::Browse,
         View::Search,
         View::Results,
         View::Detail,
+        View::Description,
         View::Related,
         View::Library,
         View::Holds,
@@ -4558,10 +5098,10 @@ mod tests {
             },
             browse_number: 2,
             related: many(8),
-            detail: Some(publication(
+            detail: Some(described(publication(
                 "Fixture title",
                 vec![source(), out_of_copies()],
-            )),
+            ))),
             books: (0..8)
                 .map(|index| book(&format!("book-{index}"), "montreal", None))
                 .collect(),
@@ -4644,7 +5184,7 @@ mod tests {
             for view in VIEWS {
                 let app = PretNumerique {
                     view,
-                    content_height: metrics.prose_area(true, true).height,
+                    metrics,
                     ..populated()
                 };
                 let errors = app
@@ -4676,7 +5216,7 @@ mod tests {
                         "empty",
                         PretNumerique {
                             view,
-                            content_height: metrics.prose_area(true, true).height,
+                            metrics,
                             note: Some(
                                 "A note long enough to take a line of its own on a narrow panel."
                                     .to_owned(),
@@ -4688,7 +5228,7 @@ mod tests {
                         "waiting",
                         PretNumerique {
                             view,
-                            content_height: metrics.prose_area(true, true).height,
+                            metrics,
                             inflight: waiting_for(view).map(|kind| (kobo_sdk::TaskId(1), kind)),
                             ..PretNumerique::default()
                         },
@@ -4770,14 +5310,13 @@ mod tests {
         assert!(quiet_drawn.contains("Similar"));
 
         for (name, metrics) in CONTENT_PANELS {
-            // The runtime tells the app how tall the panel is, and how much of
-            // a book's screen is optional follows from that.
-            let height = metrics.prose_area(true, true).height;
+            // The runtime tells the app which panel it is drawing to, and how
+            // much of a book's screen is optional follows from that.
             for (state, screen) in [
                 (
                     "busy",
                     PretNumerique {
-                        content_height: height,
+                        metrics,
                         detail: busy.detail.clone(),
                         note: busy.note.clone(),
                         watch: busy.watch.clone(),
@@ -4788,7 +5327,7 @@ mod tests {
                 (
                     "quiet",
                     PretNumerique {
-                        content_height: height,
+                        metrics,
                         detail: quiet.detail.clone(),
                         ..PretNumerique::default()
                     }
@@ -4805,6 +5344,50 @@ mod tests {
                 assert!(
                     errors.is_empty(),
                     "{name} refused a {state} book screen: {}",
+                    errors.join("; ")
+                );
+            }
+        }
+    }
+
+    /// A book with every fact the server can send, on every panel, however many
+    /// libraries carry it.
+    ///
+    /// The matrix below draws one arrangement of this screen. What the fact
+    /// budget rations is a block whose height depends on the book rather than
+    /// the panel, and the arrangement it is easiest to get wrong is the one it
+    /// has the most room for: a book one library carries, where three facts
+    /// become five and the room they came from was the second library's row.
+    #[test]
+    fn a_book_the_server_knows_everything_about_fits_every_panel() {
+        typeset();
+        for (name, metrics) in CONTENT_PANELS {
+            for sources in [vec![source()], vec![source(), out_of_copies()]] {
+                let libraries = sources.len();
+                let app = PretNumerique {
+                    view: View::Detail,
+                    metrics,
+                    detail: Some(Publication {
+                        pdf_only: true,
+                        authors: vec![
+                            "Marilou Addison".to_owned(),
+                            "Geneviève Cloutier".to_owned(),
+                        ],
+                        ..described(publication("Qui va séduire Henry ?", sources))
+                    }),
+                    ..PretNumerique::default()
+                };
+                let errors = app
+                    .screen()
+                    .diagnostics(&metrics, &Chrome::with_back(false))
+                    .issues
+                    .into_iter()
+                    .filter(|issue| issue.severity == DiagnosticSeverity::Error)
+                    .map(|issue| issue.to_string())
+                    .collect::<Vec<_>>();
+                assert!(
+                    errors.is_empty(),
+                    "{name} refused a book at {libraries} libraries: {}",
                     errors.join("; ")
                 );
             }

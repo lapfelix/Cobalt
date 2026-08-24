@@ -9,8 +9,8 @@ jobs, because a list of jobs is not a thing anyone wants to read.
 
 Discover is the first screen, and Search is on its own bar rather than in the
 bottom one. The bar stays at three destinations and the way out, although there
-are now nine screens, because the bar drops destinations it cannot give a
-finger's width to: a fifth slot on the narrowest panel would take the way out
+are more than a dozen screens, because the bar drops destinations it cannot give
+a finger's width to: a fifth slot on the narrowest panel would take the way out
 with it. Finding a book is one place -- Discover, Search, a subject, an author,
 a book, its neighbours -- and the two screens that start a search are the two
 the bar's first slot leads to.
@@ -44,8 +44,37 @@ three, an Elipsa more. Nothing is fixed, because the layout engine stops at the
 bottom of the content area and drops the rest in silence, so a page measured for
 one panel loses its last rows on a smaller one and wastes half of a larger one.
 Library works out what is left after whatever else it has to say today, and a
-book's screen carries its blurb only where there is room for it as well as the
-ways on from the book.
+book's screen carries a taste of its blurb only where there is room for it as
+well as the ways on from the book.
+
+## A book's screen
+
+A book's screen is a definition list, the libraries that carry it, and the ways
+on from it, and it is the screen with the least room to spare. The facts are
+ordered by what a borrow is actually decided on -- the author, where a copy is,
+a PDF warning, the rating, how much of the book there is, then the edition --
+and cut to what the panel holds: three of them on a six inch panel where both
+libraries carry the book, five where only one does, all of them on a ten inch
+one. Cut from the end, because what the layout engine does with a publisher's
+name that does not fit is drop the borrow button under it and say nothing.
+
+`Length` is one row whichever way the catalogue counted: `312 pages` for a
+book, `9 h 12 min` for a recording. Almost nothing has both, a fifth of the
+books have neither, and a field the libraries did not send draws no row at all
+rather than a row with nothing in it. A publication date is drawn as a month and
+a year, never a timestamp: the day is the one part of it that could be wrong,
+since half the libraries' dates are an evening in UTC.
+
+## The whole description
+
+Descriptions run to nearly four thousand characters, so the book's screen offers
+two lines of one and a row that opens the rest of it full screen, paged with the
+same two buttons every list here uses. Where the pages break is measured against
+the panel rather than counted in characters -- a page of one long paragraph holds
+half again what a page of short ones does -- and the measurement subtracts what
+the screen puts under the words, including a banner where there is one to draw.
+A page measured as though nothing were ever wrong loses its last lines the first
+time something is.
 
 ## Availability across the libraries
 
@@ -166,8 +195,10 @@ Restart `kobo dev` and clear the simulator's state store between scripts.
 What the fixture answers is drawn from a real capture of both catalogues: a
 merged home page whose first list both libraries publish, a book out at Montréal
 and free at BAnQ, one no library has free at all, an author with several books,
-a three-page browse, a shelf with due dates and two queues, and one title that
-is a PDF and nothing else.
+a three-page browse, a shelf with due dates and two queues, one title that
+is a PDF and nothing else, a blurb long enough to page through, an audiobook
+with a running time and no page count, and one title the catalogue counted
+nothing about.
 
 ## What the proxy is assumed to answer
 
@@ -184,6 +215,10 @@ parsers read every spelling that was plausible rather than one:
 - a subject carries `key`, `category` or `id`, falling back to its name;
 - the shelf is a bare array or one under `entries`, `items` or `shelf`, and a
   hold's position is either at the top level or under `holds`;
+- the edition is `published` (any ISO date, or a bare year), `number_of_pages`
+  or `numberOfPages`, `publisher` as a string or an object with a `name`, and
+  `duration` in whole seconds; each is dropped rather than drawn when it arrives
+  empty or zero;
 - PDF-only is `pdf_only`, a `format` of `pdf`, or a `formats` array of nothing
   but PDF. Asking for them anyway is `include_pdf=1` on `/browse` and
   `"include_pdf": true` in the `/search` body -- the one parameter name here

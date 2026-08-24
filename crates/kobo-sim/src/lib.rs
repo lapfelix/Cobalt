@@ -2327,6 +2327,42 @@ const PRET_BOOKS: [PretBook; 11] = [
 
 /// The index of the fixture's PDF-only title.
 const PRET_PDF_BOOK: usize = 10;
+/// The index of the fixture's audiobook, which has a running time and no page
+/// count, the way the libraries' audiobooks do.
+const PRET_AUDIOBOOK: usize = 8;
+/// The index of the title the catalogue counted nothing about: no page count and
+/// no publisher, which is about one book in five. A screen has to read as though
+/// those were never coming, and a fixture where everything is present never
+/// shows whether it does.
+const PRET_UNCOUNTED_BOOK: usize = 9;
+
+/// A blurb the length the libraries really publish.
+///
+/// The longest of the recorded descriptions runs to a little under 3,900
+/// characters, which is several pages on a six inch panel. This is around two
+/// thousand, and it is that long on purpose: the fixture used to describe every
+/// book in one sentence, so the screen that pages through a description was
+/// driven on a description that never turned a page.
+const PRET_DESCRIPTION: &str = concat!(
+    "Un été de trop, une maison de campagne que personne n'avait rouverte depuis quinze ans, ",
+    "et trois adolescentes qui se croyaient déjà adultes. Quand la voiture s'arrête devant le ",
+    "rang Lynch, Camille comprend que sa mère ne plaisantait pas: il n'y aura ni ville, ni ",
+    "amies, ni réseau. Il y aura le silence, les mouches, et la grange où son grand-père ",
+    "rangeait ce dont il ne parlait jamais. ",
+    "Ce qu'elle trouve dans cette grange n'explique rien tout de suite. Une boîte de fer, des ",
+    "lettres pliées en quatre, une photographie où sa mère a quinze ans et sourit à côté d'une ",
+    "fille dont personne ne prononce plus le nom. Camille pose une question au souper, une ",
+    "seule, et la table entière se referme comme une porte. ",
+    "L'été s'étire. Camille apprend à ramer, à mentir un peu, à reconnaître le bruit du gravier ",
+    "sous les pneus du voisin. Elle apprend surtout que sa mère a été quelqu'un d'autre avant ",
+    "d'être sa mère, et que ce quelqu'un-là a laissé une dette derrière lui. ",
+    "Marilou Addison signe ici un roman sur ce qui se transmet sans se dire: la honte, le ",
+    "courage, et la tendresse maladroite des familles qui ne savent pas parler. Un récit à ",
+    "hauteur d'adolescente, écrit avec une justesse qui n'épargne personne et ne condamne ",
+    "personne non plus. ",
+    "Pour les lecteurs de treize ans et plus, et pour les adultes qui se souviennent d'avoir eu ",
+    "treize ans dans une maison où l'on ne posait pas de questions."
+);
 
 fn pret_publication(index: usize) -> Option<String> {
     let (handle, title, author, montreal, banq) = PRET_BOOKS.get(index)?;
@@ -2344,8 +2380,17 @@ fn pret_publication(index: usize) -> Option<String> {
             r#"{{"handle":"{handle}-{catalog}","catalog":"{catalog}","catalog_name":"{name}","availability":"{availability}","is_available":{free}}}"#
         ));
     }
+    // The edition, as the proxy sends it: a date and a publisher on nearly
+    // everything, a page count on nearly every book, a running time on the
+    // audiobook and no page count with it.
+    let published = r#""published":"2024-09-11T22:00:00Z","publisher":"Éditions Québec Amérique""#;
+    let edition = match index {
+        PRET_UNCOUNTED_BOOK => r#""published":"2024""#.to_owned(),
+        PRET_AUDIOBOOK => format!(r#"{published},"duration":33120"#),
+        _ => format!(r#"{published},"number_of_pages":312"#),
+    };
     Some(format!(
-        r#"{{"handle":"{handle}","title":"{title}","authors":["{author}"],"isbn":"9782898592102","pdf_only":{},"description":"One of the fixture's books, described in a sentence so the detail screen has something to bound.","sources":[{}]}}"#,
+        r#"{{"handle":"{handle}","title":"{title}","authors":["{author}"],"isbn":"9782898592102","pdf_only":{},{edition},"description":"{PRET_DESCRIPTION}","sources":[{}]}}"#,
         index == PRET_PDF_BOOK,
         sources.join(",")
     ))

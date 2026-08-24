@@ -9,10 +9,14 @@ publish = false
 [dependencies]
 kobo-json = { path = "../../crates/kobo-json" }
 kobo-sdk = { path = "../../crates/kobo-sdk" }
+# Already linked through the SDK, which re-exports its types. Named here for
+# `paginate`, the one thing a screen has to do for itself: the SDK's own
+# wrapper measures the page a reading screen gets, and a description carries
+# the app's Previous and Next buttons under it as well.
+kobo-ui = { path = "../../crates/kobo-ui" }
 
 [dev-dependencies]
 kobo-text = { path = "../../crates/kobo-text" }
-kobo-ui = { path = "../../crates/kobo-ui" }
 
 [lints]
 workspace = true

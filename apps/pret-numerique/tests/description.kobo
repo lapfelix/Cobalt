@@ -1,0 +1,53 @@
+# A book's whole description, with the panel to itself. The book's own screen
+# has room for a taste of it, the blurb is reached by tapping that, it pages with
+# the same two buttons every list here uses, and Back is the book rather than the
+# list the book was found in.
+clean
+tap Mensonges
+wait-for Book details
+expect Marilou Addison
+expect 312 pages
+expect About this book
+expect Read the whole description
+clean
+tap Read the whole description
+wait-for About this book
+expect Un été de trop
+expect Page 1 of
+expect Previous page
+expect Next page
+clean
+tap Next page
+wait-for Page 2
+expect-missing Un été de trop
+clean
+tap Previous page
+wait-for Page 1
+expect Un été de trop
+clean
+tap Back
+wait-for Book details
+expect Choose a library
+clean
+# How much of a book there is is one fact, and it is whichever of the two the
+# catalogue counted: an audiobook is hours, and has no pages at all.
+tap Back
+wait-for Prêt numérique
+tap Next page
+wait-for En août, je lis québécois
+tap Next page
+wait-for Littérature queer
+tap Le Somnambule
+wait-for Book details
+expect 9 h 12 min
+expect-missing pages
+clean
+# And the one title nobody counted draws nothing where the count would be,
+# rather than a row with nothing in it.
+tap Back
+wait-for Littérature queer
+tap Typiquement Eliza
+wait-for Book details
+expect Sophie Lee
+expect-missing Length
+clean
