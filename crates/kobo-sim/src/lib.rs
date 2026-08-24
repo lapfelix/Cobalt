@@ -2521,9 +2521,13 @@ fn pret_publications(indices: &[usize]) -> String {
 fn pret_discovery_body() -> Vec<u8> {
     format!(
         r#"{{"groups":[
+{{"title":"Constellations","category":"recommendation:constellations-favorites","total":2,"publications":[{}]}},
+{{"title":"Jeunesse","category":"recommendation:cj-semester","total":3,"publications":[{}]}},
 {{"title":"Recent releases","category":"recent","total":3204,"publications":[{}]}},
 {{"title":"En août, je lis québécois","category":"aout","total":18,"publications":[{}]}},
 {{"title":"Littérature queer","category":"queer","total":12,"publications":[{}]}}]}}"#,
+        pret_publications(&[0, 1]),
+        pret_publications(&[2, 3, 4]),
         pret_publications(&[0, 1, 2, 3, 4]),
         pret_publications(&[7, 5, 6]),
         pret_publications(&[8, 9])
@@ -2555,11 +2559,18 @@ fn pret_browse_body(query: &str) -> Vec<u8> {
         .unwrap_or(1)
         .max(1);
     let author = pret_query(query, "author").is_some();
+    let category = pret_query(query, "category");
     let with_pdf = pret_query(query, "include_pdf").is_some();
     let sort = pret_query(query, "sort").unwrap_or_else(|| "issued_on_desc".to_owned());
     let sorts = r#"[{"key":"issued_on_desc","label":"Recent releases"},{"key":"created_at_desc","label":"Recent acquisitions"}]"#;
     let (indices, has_next): (Vec<usize>, bool) = if author {
         (vec![2, 3, 4, 5], false)
+    } else if category.as_deref() == Some("queer") {
+        (vec![8, 9], false)
+    } else if category.as_deref() == Some("recommendation:constellations-favorites") {
+        (vec![0, 1], false)
+    } else if category.as_deref() == Some("recommendation:cj-semester") {
+        (vec![2, 3, 4], false)
     } else {
         // Six to a page, which is what a Clara 2E holds: a server page shorter
         // than the panel never shows whether the panel is full. The collection

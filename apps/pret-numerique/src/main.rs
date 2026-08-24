@@ -92,12 +92,10 @@ const MIN_DETAIL_FACTS: usize = 2;
 const NOTE_LINES: i32 = 4;
 
 const MAX_PAGE_ROWS: usize = 8;
-/// How many of the libraries' lists Discover draws at once.
-///
-/// One to a page: a page is then a shelf with some books on it and the way into
-/// the rest, rather than two lists with one book each, which says nothing about
-/// either.
-const DISCOVER_GROUPS_PER_PAGE: usize = 1;
+/// The landing screen is an index of sections, not a book shelf. Four rows
+/// leave room for the short intro and the pager on a Clara while making the
+/// first screen useful without turning it into a wall of titles.
+const DISCOVER_SECTIONS_PER_PAGE: usize = 4;
 /// A book's screen carries a description preview whenever the panel can
 /// spare one optional block. A Clara has 1190 pixels of content and an
 /// Elipsa 1677; a Nia has 842, which is one block short.
@@ -883,8 +881,9 @@ impl PretNumerique {
         screen.build()
     }
 
-    /// What the libraries are putting forward today, merged into one list of
-    /// lists.
+    /// The section index for what the libraries and curated sources are putting
+    /// forward today. Books belong on the next screen, after the reader picks
+    /// a section.
     fn discover_screen(&self) -> Screen {
         let mut screen = Self::nav(
             ScreenBuilder::new("discover")
@@ -895,79 +894,111 @@ impl PretNumerique {
         );
         screen = self.note_block(screen, BannerLevel::Attention);
         screen = screen
-            .heading("Curated shelves")
-            .text("Library picks and Québec reading lists, cross-referenced with your libraries.");
+            .heading("Browse sections")
+            .text("Pick a list to see its books.");
         let favorites = self.favorite_categories();
-        if !favorites.is_empty() {
-            screen = screen.section_rows(
-                "Favorite categories",
-                None,
-                favorites
-                    .iter()
-                    .take(3)
-                    .enumerate()
-                    .map(|(index, category)| {
-                        (
-                            format!("{FAVORITE_BROWSE}.{index}"),
-                            self.row_title(&category.path),
-                            bookstore_category_summary(category),
-                            Glyph::Bookmark,
-                        )
-                    }),
-            );
-        }
-        if self.groups.is_empty() && self.awaiting(RequestKind::Discovery) {
+        if self.groups.is_empty() && favorites.is_empty() && self.awaiting(RequestKind::Discovery) {
             return screen.skeleton(self.skeleton_lines()).build();
         }
-        if self.groups.is_empty() {
+        let group_indices = self.discover_group_indices();
+        let mut sections = Vec::with_capacity(group_indices.len() + favorites.len().min(3));
+        for index in group_indices {
+            let Some(group) = self.groups.get(index) else {
+                continue;
+            };
+            sections.push((
+                format!("group.{index}"),
+                self.row_title(&self.discover_group_title(group)),
+                self.discover_group_summary(group),
+                Glyph::Circle,
+            ));
+        }
+        for (index, category) in favorites.iter().take(3).enumerate() {
+            sections.push((
+                format!("{FAVORITE_BROWSE}.{index}"),
+                self.row_title(&category.path),
+                bookstore_category_summary(category),
+                Glyph::Bookmark,
+            ));
+        }
+        if sections.is_empty() {
             screen = screen.empty_state("Nothing from the libraries yet.");
         } else {
-            let first = self.groups_page * DISCOVER_GROUPS_PER_PAGE;
-            for (offset, group) in self
-                .groups
-                .iter()
-                .skip(first)
-                .take(DISCOVER_GROUPS_PER_PAGE)
-                .enumerate()
-            {
-                let index = first + offset;
-                let books = group
-                    .publications
+            let per_page = self.discover_sections_per_page();
+            screen = screen.rows(
+                sections
                     .iter()
-                    .take(self.discover_books())
-                    .enumerate()
-                    .map(|(book, publication)| {
-                        (
-                            format!("group.{index}.book.{book}"),
-                            self.row_title(&publication.title),
-                            publication_summary(publication),
-                            Glyph::Book,
-                        )
-                    })
-                    .chain(group.category.as_ref().map(|_| {
-                        (
-                            format!("group.{index}"),
-                            "See the whole list".to_owned(),
-                            group_count(group),
-                            Glyph::Circle,
-                        )
-                    }));
-                screen = screen.section_rows(group.title.clone(), None, books);
-            }
+                    .skip(self.groups_page * per_page)
+                    .take(per_page)
+                    .map(|(action, title, summary, glyph)| {
+                        (action.clone(), title.clone(), summary.clone(), *glyph)
+                    }),
+            );
             screen = Self::page_controls(
                 screen,
                 Paging {
                     page: u32::try_from(self.groups_page + 1).unwrap_or(1),
-                    total_pages: u32::try_from(
-                        self.groups.len().div_ceil(DISCOVER_GROUPS_PER_PAGE).max(1),
-                    )
-                    .ok(),
+                    total_pages: u32::try_from(sections.len().div_ceil(per_page).max(1)).ok(),
                     has_previous: self.groups_page > 0,
-                    has_next: (self.groups_page + 1) * DISCOVER_GROUPS_PER_PAGE < self.groups.len(),
+                    has_next: (self.groups_page + 1) * per_page < sections.len(),
                 },
             );
         }
         screen.build()
+    }
+
+    /// Recommendation shelves arrive before ordinary library lists. Keep that
+    /// promise even if an older proxy response was assembled in another order.
+    fn discover_group_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<_> = (0..self.groups.len()).collect();
+        indices.sort_by_key(|&index| match self.groups[index].category.as_deref() {
+            Some("recommendation:constellations-favorites") => 0,
+            Some("recommendation:cj-semester") => 1,
+            Some("recommendation:constellations-8-10") => 2,
+            Some("recommendation:cj-12-17") => 3,
+            _ => 10,
+        });
+        indices
+    }
+
+    /// The source labels are useful in detail badges, but the landing screen
+    /// needs short, distinct section names that fit on one line.
+    fn discover_group_title(&self, group: &Group) -> String {
+        match group.category.as_deref() {
+            Some("recommendation:constellations-favorites") => "Constellations".to_owned(),
+            Some("recommendation:cj-semester") => "Jeunesse".to_owned(),
+            Some("recommendation:constellations-8-10") => "Constellations · 8–10".to_owned(),
+            Some("recommendation:cj-12-17") => "Jeunesse · 12–17".to_owned(),
+            _ => group.title.clone(),
+        }
+    }
+
+    fn discover_group_summary(&self, group: &Group) -> String {
+        let count = group_count(group);
+        match group.category.as_deref() {
+            Some("recommendation:constellations-favorites") => {
+                format!("Constellations · coup de coeur · {count}")
+            }
+            Some("recommendation:cj-semester") => {
+                format!("Communication Jeunesse · semestre · {count}")
+            }
+            Some("recommendation:constellations-8-10") => {
+                format!("Constellations · 8–10 · {count}")
+            }
+            Some("recommendation:cj-12-17") => {
+                format!("Communication Jeunesse · 12–17 · {count}")
+            }
+            _ => count,
+        }
+    }
+
+    fn discover_sections_per_page(&self) -> usize {
+        DISCOVER_SECTIONS_PER_PAGE
+            .min(self.rows_that_fit(
+                self.heading_cost() + Self::text_line_cost() + self.gap(),
+                DISCOVER_SECTIONS_PER_PAGE,
+            ))
+            .max(1)
     }
 
     fn categories_screen(&self) -> Screen {
@@ -1919,13 +1950,6 @@ impl PretNumerique {
     /// How many rows a list under a screen heading holds on one page.
     fn page_rows(&self) -> usize {
         self.list_rows(self.heading_cost())
-    }
-
-    /// How many books a discovery list shows before offering the rest of it.
-    /// The section's own heading and the row that opens the whole list come off
-    /// the page first.
-    fn discover_books(&self) -> usize {
-        self.page_rows().saturating_sub(2).max(1)
     }
 
     /// How many of a book's optional blocks fit under the libraries.
@@ -3479,11 +3503,13 @@ impl PretNumerique {
                 self.holds_page = turned(self.holds_page, forward, count, per_page);
             }
             View::Discover => {
+                let section_count =
+                    self.discover_group_indices().len() + self.favorite_categories().len().min(3);
                 self.groups_page = turned(
                     self.groups_page,
                     forward,
-                    self.groups.len(),
-                    DISCOVER_GROUPS_PER_PAGE,
+                    section_count,
+                    self.discover_sections_per_page(),
                 );
             }
             // One page of prose at a time, and the pages are worked out from the
@@ -7390,13 +7416,45 @@ mod tests {
         };
         let drawn = format!("{:?}", app.discover_screen());
         assert!(drawn.contains("Recent releases"));
-        assert!(drawn.contains("Les triplettes"));
-        // A row says whether it can be had, and no more: which library is the
-        // book screen's business, because that is where a library is chosen.
-        assert!(drawn.contains("A. Michaud · Available"));
+        assert!(!drawn.contains("Les triplettes"));
         assert!(!drawn.contains("Available now at BAnQ"));
-        assert!(drawn.contains("See the whole list"));
         assert!(drawn.contains("3,204 books in this list"));
+    }
+
+    #[test]
+    fn discover_puts_curated_sections_first_and_opens_a_browse_list() {
+        let groups = parse_groups(
+            r#"{"groups":[
+                {"title":"Recent releases","category":"recent","total":3204,"publications":[]},
+                {"title":"Communication Jeunesse · Sélection du semestre","category":"recommendation:cj-semester","total":18,"publications":[]},
+                {"title":"Constellations coup de coeur","category":"recommendation:constellations-favorites","total":9,"publications":[]}] }"#.as_bytes(),
+        )
+        .expect("a readable home page");
+        let mut app = AppRunner::new(PretNumerique {
+            view: View::Discover,
+            groups,
+            ..PretNumerique::default()
+        });
+        app.start();
+        let drawn = format!("{:?}", app.app().discover_screen());
+        let constellations = drawn.find("Constellations").expect("curated section");
+        let jeunesse = drawn.find("Jeunesse").expect("jeunesse section");
+        let recent = drawn.find("Recent releases").expect("library section");
+        assert!(constellations < jeunesse && jeunesse < recent, "{drawn}");
+        assert!(drawn.contains("Constellations · coup de coeur"), "{drawn}");
+        assert!(
+            drawn.contains("Communication Jeunesse · semestre"),
+            "{drawn}"
+        );
+        assert!(!drawn.contains("See the whole list"), "{drawn}");
+        assert!(!drawn.contains("Les triplettes"), "{drawn}");
+
+        app.action(action_id("group.1"));
+        assert_eq!(app.app().view, View::Browse);
+        assert_eq!(
+            app.app().browse.title,
+            "Communication Jeunesse · Sélection du semestre"
+        );
     }
 
     /// A list row has one line under the title, and these are the names that

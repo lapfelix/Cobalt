@@ -3,6 +3,8 @@
 # the same two buttons every list here uses, and Back is the book rather than the
 # list the book was found in.
 clean
+tap Recent releases
+wait-for Filters
 tap Mensonges
 wait-for Book details
 expect Marilou Addison
@@ -29,14 +31,17 @@ tap Back
 wait-for Book details
 expect Choose a library
 clean
-# How much of a book there is is one fact, and it is whichever of the two the
-# catalogue counted: an audiobook is hours, and has no pages at all.
+# Back first returns to the browse list, then to the section index.
+tap Back
+wait-for Filters
 tap Back
 wait-for Prêt numérique
-tap Next page
-wait-for En août, je lis québécois
+# How much of a book there is is one fact, and it is whichever of the two the
+# catalogue counted: an audiobook is hours, and has no pages at all.
 tap Next page
 wait-for Littérature queer
+tap Littérature queer
+wait-for Filters
 tap Le Somnambule
 wait-for Book details
 expect 9 h 12 min
@@ -45,7 +50,7 @@ clean
 # And the one title nobody counted draws nothing where the count would be,
 # rather than a row with nothing in it.
 tap Back
-wait-for Littérature queer
+wait-for Filters
 tap Typiquement Eliza
 wait-for Book details
 expect Sophie Lee
