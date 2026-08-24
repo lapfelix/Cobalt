@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use fontdue::{Font, FontSettings};
 use kobo_ui::{BreakOpportunity, DisplayMetrics, Face, FontSize, Typesetter};
@@ -167,13 +167,23 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// One rasterised glyph, kept so a repeated character is never rasterised twice.
+///
+/// `coverage` is shared rather than owned because a hit on this cache used to
+/// copy it. The cache saved the rasterising and then paid a heap allocation and
+/// a memcpy of the bitmap for every glyph of every frame -- a page of prose is
+/// several thousand of them, each a few hundred bytes, on a reader whose
+/// allocator is the slowest thing in the drawing path. Handing back a second
+/// reference costs one refcount instead.
+#[derive(Clone)]
 struct Raster {
     width: usize,
     height: usize,
     left: i32,
     top: i32,
-    advance: i32,
-    coverage: Vec<u8>,
+    /// The advance fontdue reports, unrounded, so the pen can accumulate in
+    /// floating point without asking the face again for something already known.
+    advance: f32,
+    coverage: Arc<[u8]>,
 }
 
 /// A loaded face, sized for one panel.
@@ -333,19 +343,11 @@ impl Typeface {
                 // `ymin` measures up from the baseline to the bottom of the
                 // bitmap, so the top edge is the baseline minus both.
                 top: -(metrics.ymin + i32::try_from(metrics.height).unwrap_or(0)),
-                advance: metrics.advance_width.round() as i32,
-                coverage,
+                advance: metrics.advance_width,
+                coverage: Arc::from(coverage),
             });
         }
-        let raster = cache.get(&key)?;
-        Some(Raster {
-            width: raster.width,
-            height: raster.height,
-            left: raster.left,
-            top: raster.top,
-            advance: raster.advance,
-            coverage: raster.coverage.clone(),
-        })
+        cache.get(&key).cloned()
     }
 
     /// Whether this face carries a glyph for `character`.
@@ -510,26 +512,33 @@ impl Typeface {
             if let Some(raster) = face.raster(character, pixels) {
                 let origin_x = (pen.round() as i32).saturating_add(raster.left);
                 let origin_y = baseline.saturating_add(raster.top);
-                for row in 0..raster.height {
-                    for column in 0..raster.width {
-                        let coverage = raster
-                            .coverage
-                            .get(row.saturating_mul(raster.width).saturating_add(column))
-                            .copied()
-                            .unwrap_or(0);
-                        if coverage > 0 {
-                            plot(
-                                origin_x.saturating_add(i32::try_from(column).unwrap_or(0)),
-                                origin_y.saturating_add(i32::try_from(row).unwrap_or(0)),
-                                coverage,
-                            );
+                // Walked as rows of the bitmap rather than by index. The index
+                // form re-derived an offset it already had and had it checked
+                // against the length again, once per pixel of every glyph, which
+                // is the innermost loop in the whole renderer.
+                if raster.width > 0 {
+                    for (row, line) in raster
+                        .coverage
+                        .chunks(raster.width)
+                        .take(raster.height)
+                        .enumerate()
+                    {
+                        let y = origin_y.saturating_add(i32::try_from(row).unwrap_or(0));
+                        for (column, &coverage) in line.iter().enumerate() {
+                            if coverage > 0 {
+                                plot(
+                                    origin_x.saturating_add(i32::try_from(column).unwrap_or(0)),
+                                    y,
+                                    coverage,
+                                );
+                            }
                         }
                     }
                 }
-                pen += cell.map_or_else(
-                    || face.font.metrics(character, pixels).advance_width,
-                    |cell| cell as f32,
-                );
+                // The advance came back with the bitmap. Asking the face for it
+                // again was a second glyph-index lookup and a second metrics
+                // computation per glyph, for a number already in hand.
+                pen += cell.map_or(raster.advance, |cell| cell as f32);
             } else if let Some(cell) = cell {
                 // A character with no outline, a space above all, still owns
                 // its column. Skipping it would shift the rest of the row left.
