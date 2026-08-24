@@ -30,6 +30,48 @@ fn selected_profile() -> &'static DeviceProfile {
     }
 }
 
+/// The chrome a screen from the hosted app is drawn with.
+///
+/// The same decision `kobod`'s `chrome_for` makes on a device, and it has to
+/// stay the same decision: the band is laid out above everything else, so a
+/// simulator that leaves it out hands every screen five millimetres of room
+/// that will not be there. That is a whole line of a six inch panel, and it is
+/// exactly the amount by which a real Clara sheared the page controls off the
+/// bottom of a list the simulator drew perfectly. `Chrome::default()` was what
+/// stood here, and it drew no band at all.
+///
+/// The band is withheld from a reading screen, as it is on a device: a book is
+/// a book, not a book with a clock on it.
+///
+/// `at_home` is true here because the simulator hosts one application and
+/// presents it directly, which is the arrangement `kobo dev` and a
+/// single-application install both produce. So Back is drawn only for a screen
+/// that asked for it.
+fn app_chrome(screen: &Screen) -> kobo_ui::Chrome {
+    let chrome = kobo_ui::Chrome::with_back(screen.owns_back);
+    if screen.reading {
+        return chrome;
+    }
+    chrome.with_status(simulated_status())
+}
+
+/// One reading of everything the band shows, synthesized.
+///
+/// `kobod`'s `read_status` asks the hardware. There is no hardware here, so
+/// these are plausible and fixed: the panel is redrawn on every request and a
+/// clock that moved would make every frame differ from the one before it,
+/// which is the one thing a deterministic simulator must not do. Only the
+/// band's height is load-bearing, and that does not depend on what it says.
+fn simulated_status() -> kobo_ui::Status {
+    kobo_ui::Status {
+        clock: "04:22".to_owned(),
+        signal: kobo_ui::Signal::Fair,
+        battery: Some(kobo_ui::Percent::new(72)),
+        charging: false,
+        bluetooth: false,
+    }
+}
+
 fn profile_metrics() -> DisplayMetrics {
     DisplayMetrics {
         width: i32::try_from(selected_profile().width).unwrap_or(i32::MAX),
@@ -252,7 +294,7 @@ impl Simulator {
         kobo_ui::render_with(
             &self.screen,
             &profile_metrics(),
-            &kobo_ui::Chrome::default(),
+            &app_chrome(&self.screen),
             &mut surface,
             None,
         );
@@ -265,10 +307,17 @@ impl Simulator {
         let raw = selected_profile().display_to_touch(display_x, display_y)?;
         let display = selected_profile().touch_to_display(raw.0, raw.1)?;
         self.last_touch = Some(SimulatedTouch { display, raw });
-        let action = self.screen.hit_test(
-            i32::try_from(display.0).ok()?,
-            i32::try_from(display.1).ok()?,
-        )?;
+        // Laid out with the same metrics and the same chrome the panel was
+        // drawn with. `Screen::hit_test` assumes a bare Clara and no status
+        // band, so a tap on a screen drawn with one lands a band's height above
+        // whatever the reader aimed at.
+        let action = self
+            .screen
+            .layout_with(&profile_metrics(), &app_chrome(&self.screen))
+            .hit_test(
+                i32::try_from(display.0).ok()?,
+                i32::try_from(display.1).ok()?,
+            )?;
         if action == ActionId(1) {
             self.counter = self.counter.saturating_add(1);
             self.rebuild_screen();
@@ -990,7 +1039,7 @@ impl AppSession {
         kobo_ui::render_all(
             &state.screen,
             &profile_metrics(),
-            &kobo_ui::Chrome::default(),
+            &app_chrome(&state.screen),
             state.active_pictures(),
             &mut surface,
             None,
@@ -1029,6 +1078,7 @@ impl AppSession {
         });
         state
             .screen
+            .layout_with(&profile_metrics(), &app_chrome(&state.screen))
             .hit_test(i32::try_from(mapped.0).ok()?, i32::try_from(mapped.1).ok()?)
     }
 
@@ -1155,7 +1205,7 @@ impl AppSession {
 
 fn diagnostics_json(screen: &Screen, pictures: &kobo_ui::PictureCache) -> String {
     let diagnostics =
-        screen.diagnostics_with_pictures(&profile_metrics(), &kobo_ui::Chrome::default(), pictures);
+        screen.diagnostics_with_pictures(&profile_metrics(), &app_chrome(screen), pictures);
     let mut json = String::from("{\"issues\":[");
     for (index, issue) in diagnostics.issues.iter().enumerate() {
         if index > 0 {
@@ -1284,7 +1334,7 @@ fn parse_lifecycle(bytes: &[u8]) -> Option<Lifecycle> {
 /// class of fault worth catching.
 fn layout_json(screen: &Screen, paints: u64) -> String {
     let metrics = profile_metrics();
-    let layout = screen.layout_with(&metrics, &kobo_ui::Chrome::default());
+    let layout = screen.layout_with(&metrics, &app_chrome(screen));
     let mut json = format!("{{\"paints\":{paints},\"nodes\":[");
     for (index, node) in layout.nodes.iter().enumerate() {
         if index > 0 {
@@ -2106,7 +2156,13 @@ const PRET_SETTLED_JOBS: [(&str, &str); 5] = [
 /// The requests the fixture carries through to a settled state: id, kind,
 /// title, catalog, and the book they belong to once there is one.
 const PRET_ACTIVE_JOBS: [(&str, &str, &str, &str, &str); 6] = [
-    ("fixture-borrow-job", "borrow", "Dune", "montreal", ""),
+    (
+        "fixture-borrow-job",
+        "borrow",
+        "Le potager du fixture",
+        "montreal",
+        "",
+    ),
     (
         "fixture-hold-job",
         "hold",
@@ -2114,11 +2170,17 @@ const PRET_ACTIVE_JOBS: [(&str, &str, &str, &str, &str); 6] = [
         "montreal",
         "",
     ),
-    ("fixture-hamlet-borrow-job", "borrow", "Hamlet", "banq", ""),
     (
-        "fixture-earthsea-borrow-job",
+        "fixture-tempete-borrow-job",
         "borrow",
-        "A Wizard of Earthsea",
+        "La tempête du fixture",
+        "banq",
+        "",
+    ),
+    (
+        "fixture-verger-borrow-job",
+        "borrow",
+        "Le verger du fixture",
         "montreal",
         "",
     ),
@@ -2224,15 +2286,20 @@ fn pret_books_body() -> Vec<u8> {
     .into_bytes()
 }
 
-/// One book in the fixture's catalogue: handle, title, author, and whether
-/// Montréal and BAnQ each have a copy free.
+/// One book in the fixture's catalogue: handle, title, the authors as the feed
+/// sends them, and whether Montréal and BAnQ each have a copy free.
 ///
 /// `None` means that library does not carry the book at all, `Some(false)` that
 /// every copy of it is out.
+///
+/// The authors are a list rather than a name because these feeds send lists: a
+/// collection of short stories carries one author per story, and the fixture
+/// that gave every title exactly one author never showed what five of them do
+/// to a row.
 type PretBook = (
     &'static str,
     &'static str,
-    &'static str,
+    &'static [&'static str],
     Option<bool>,
     Option<bool>,
 );
@@ -2242,75 +2309,76 @@ type PretBook = (
 ///
 /// The first entry is out at Montréal and free at BAnQ, which is the case the
 /// merged availability exists for; the second is out at both, which is the only
-/// case that offers a hold; the last is a PDF and nothing else.
-const PRET_BOOKS: [PretBook; 11] = [
+/// case that offers a hold; the last two are a PDF and nothing else, and the
+/// collection five people wrote.
+const PRET_BOOKS: [PretBook; 12] = [
     (
         "fixture-triplettes",
         "Les triplettes - Tome 1",
-        "Ariane Michaud",
+        &["Ariane Michaud"],
         Some(false),
         Some(true),
     ),
     (
         "fixture-henry",
         "Qui va séduire Henry ?",
-        "Marilou Addison",
+        &["Marilou Addison"],
         Some(false),
         Some(false),
     ),
     (
         "fixture-mensonges",
         "Mensonges",
-        "Marilou Addison",
+        &["Marilou Addison"],
         Some(true),
         None,
     ),
     (
         "fixture-volant",
         "Les mains sur le volant",
-        "Marilou Addison",
+        &["Marilou Addison"],
         Some(true),
         Some(true),
     ),
     (
         "fixture-noel",
         "Un dernier arrêt avant Noël",
-        "Marilou Addison",
+        &["Marilou Addison"],
         Some(true),
         None,
     ),
     (
         "fixture-resolument",
         "Résolument moi !",
-        "Marilou Addison",
+        &["Marilou Addison"],
         Some(true),
         Some(false),
     ),
     (
         "fixture-mousse",
         "Mousse aux fraises T.18",
-        "Marilou Addison",
+        &["Marilou Addison"],
         Some(false),
         Some(true),
     ),
     (
         "fixture-lynch",
         "La maison du rang Lynch",
-        "Alexie Morin",
+        &["Alexie Morin"],
         Some(true),
         None,
     ),
     (
         "fixture-somnambule",
         "Le Somnambule",
-        "Lars Kepler",
+        &["Lars Kepler"],
         None,
         Some(true),
     ),
     (
         "fixture-eliza",
         "Typiquement Eliza",
-        "Sophie Lee",
+        &["Sophie Lee"],
         None,
         Some(false),
     ),
@@ -2319,9 +2387,25 @@ const PRET_BOOKS: [PretBook; 11] = [
     (
         "fixture-guide",
         "Le guide illustré du potager",
-        "Lise Tremblay",
+        &["Lise Tremblay"],
         Some(true),
         None,
+    ),
+    // The collection five people wrote. A row has one line under its title and
+    // five Québécois names set end to end are two of them, so this is the title
+    // that shows whether a list row shortens what it cannot fit.
+    (
+        "fixture-anniversaire",
+        "Affreux anniversaire",
+        &[
+            "Jocelyn Boisvert",
+            "Julie Champagne",
+            "Denis Côté",
+            "Alexandre Côté-Fournier",
+            "Pierrette Dubé",
+        ],
+        None,
+        Some(false),
     ),
 ];
 
@@ -2365,7 +2449,7 @@ const PRET_DESCRIPTION: &str = concat!(
 );
 
 fn pret_publication(index: usize) -> Option<String> {
-    let (handle, title, author, montreal, banq) = PRET_BOOKS.get(index)?;
+    let (handle, title, authors, montreal, banq) = PRET_BOOKS.get(index)?;
     let mut sources = Vec::new();
     for (catalog, name, state) in [("montreal", "Montréal", montreal), ("banq", "BAnQ", banq)] {
         let Some(free) = state else {
@@ -2390,7 +2474,12 @@ fn pret_publication(index: usize) -> Option<String> {
         _ => format!(r#"{published},"number_of_pages":312"#),
     };
     Some(format!(
-        r#"{{"handle":"{handle}","title":"{title}","authors":["{author}"],"isbn":"9782898592102","pdf_only":{},{edition},"description":"{PRET_DESCRIPTION}","sources":[{}]}}"#,
+        r#"{{"handle":"{handle}","title":"{title}","authors":[{}],"isbn":"9780000000000","pdf_only":{},{edition},"description":"{PRET_DESCRIPTION}","sources":[{}]}}"#,
+        authors
+            .iter()
+            .map(|author| format!("\"{author}\""))
+            .collect::<Vec<_>>()
+            .join(","),
         index == PRET_PDF_BOOK,
         sources.join(",")
     ))
@@ -2419,13 +2508,18 @@ fn pret_discovery_body() -> Vec<u8> {
 }
 
 fn pret_categories_body() -> Vec<u8> {
-    br#"{"categories":[
-{"name":"Children's, Teenage & Educational","key":"Y","catalogs":["montreal","banq"],"total":11594},
-{"name":"Fiction & Related items","key":"F","catalogs":["montreal","banq"],"total":9803},
-{"name":"Biography, Literature & Literary studies","key":"D","catalogs":["montreal","banq"],"total":2211},
-{"name":"Graphic novels, Comic books, Cartoons","key":"X","catalogs":["montreal","banq"],"total":1408},
-{"name":"The Arts","key":"A","catalogs":["montreal"],"total":604},
-{"name":"Mathematics & Science","key":"P","catalogs":["banq"],"total":331}]}"#
+    // French, because the proxy asks for it, and long, because Thema's names
+    // are: the first of these is the one that set across two lines of display
+    // type on a real Clara and cost the browse screen a row of books, and the
+    // second is longer than the bar can set at all.
+    r#"{"categories":[
+{"name":"Enfant, adolescent et enseignement","key":"Y","catalogs":["montreal","banq"],"total":11594},
+{"name":"Biographies, littérature et études littéraires : généralités","key":"D","catalogs":["montreal","banq"],"total":2211},
+{"name":"Fiction et thèmes associés","key":"F","catalogs":["montreal","banq"],"total":9803},
+{"name":"Bandes dessinées et romans graphiques","key":"X","catalogs":["montreal","banq"],"total":1408},
+{"name":"Arts","key":"A","catalogs":["montreal"],"total":604},
+{"name":"Mathématiques et sciences","key":"P","catalogs":["banq"],"total":331}]}"#
+        .as_bytes()
         .to_vec()
 }
 
@@ -2443,10 +2537,14 @@ fn pret_browse_body(query: &str) -> Vec<u8> {
     let (indices, has_next): (Vec<usize>, bool) = if author {
         (vec![2, 3, 4, 5], false)
     } else {
+        // Six to a page, which is what a Clara 2E holds: a server page shorter
+        // than the panel never shows whether the panel is full. The collection
+        // five people wrote leads the first page, because a browse list is where
+        // a row of five names cost a row of books.
         match page {
-            1 => (vec![0, 1, 2, 3], true),
-            2 => (vec![4, 5, 6, 7], true),
-            _ => (vec![8, 9], false),
+            1 => (vec![11, 0, 1, 2, 3, 4], true),
+            2 => (vec![5, 6, 7, 8, 9], true),
+            _ => (vec![1, 3], false),
         }
     };
     let mut ordered: Vec<usize> = if sort == "created_at_desc" {
@@ -2621,18 +2719,18 @@ fn pret_fixture_post(
         }
         if request_text.contains("nonsense") {
             br#"{"results":[],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#
-        } else if request_text.contains("hamlet") {
-            r#"{"results":[{"title":"Hamlet","authors":["William Shakespeare"],"isbn":"9780743477123","description":"A prince confronts grief, betrayal, and the cost of revenge in Shakespeare's tragedy.","goodreads_rating":4.02,"goodreads_ratings_count":900000,"goodreads_reviews_count":32000,"sources":[{"handle":"fixture-hamlet-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"On loan","is_available":false},{"handle":"fixture-hamlet-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
-        } else if request_text.contains("earthsea") {
-            r#"{"results":[{"title":"A Wizard of Earthsea","authors":["Ursula K. Le Guin"],"isbn":"9780547773742","description":"Ged, a gifted young wizard, learns that true power begins with knowing the shadow within himself.","goodreads_rating":4.25,"goodreads_ratings_count":430000,"goodreads_reviews_count":21000,"sources":[{"handle":"fixture-earthsea-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-earthsea-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"On loan","is_available":false}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+        } else if request_text.contains("tempete") {
+            r#"{"results":[{"title":"La tempête du fixture","authors":["Fixture Latulippe"],"isbn":"9780000000002","description":"Un titre de démonstration, écrit pour le simulateur et pour rien d'autre.","goodreads_rating":4.0,"goodreads_ratings_count":1000,"goodreads_reviews_count":100,"sources":[{"handle":"fixture-tempete-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"On loan","is_available":false},{"handle":"fixture-tempete-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+        } else if request_text.contains("verger") {
+            r#"{"results":[{"title":"Le verger du fixture","authors":["Fixture Beauchemin"],"isbn":"9780000000003","description":"Un deuxième titre de démonstration, pour la deuxième bibliothèque.","goodreads_rating":4.2,"goodreads_ratings_count":2000,"goodreads_reviews_count":200,"sources":[{"handle":"fixture-verger-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-verger-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"On loan","is_available":false}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
         } else {
-            r#"{"results":[{"title":"Dune","authors":["Frank Herbert"],"isbn":"9780441013593","description":"On the desert world Arrakis, Paul Atreides is drawn into a struggle over power, prophecy, and survival.","goodreads_rating":4.29,"goodreads_ratings_count":1700633,"goodreads_reviews_count":88668,"sources":[{"handle":"fixture-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
+            r#"{"results":[{"title":"Le potager du fixture","authors":["Fixture Nepveu-Villeneuve","Fixture Champagne","Fixture Côté","Fixture Côté-Fournier","Fixture Dubé"],"isbn":"9780000000001","description":"Le titre de démonstration que les scripts empruntent. Cinq auteurs, parce qu'une rangée n'a qu'une ligne pour les nommer.","goodreads_rating":4.3,"goodreads_ratings_count":1700,"goodreads_reviews_count":88,"sources":[{"handle":"fixture-montreal-handle","catalog":"montreal","catalog_name":"Montréal","availability":"Available now","is_available":true},{"handle":"fixture-banq-handle","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true}]}],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#.as_bytes()
         }
     } else if path == "/jobs" {
-        let id = if request_text.contains("fixture-hamlet-banq-handle") {
-            "fixture-hamlet-borrow-job"
-        } else if request_text.contains("fixture-earthsea-montreal-handle") {
-            "fixture-earthsea-borrow-job"
+        let id = if request_text.contains("fixture-tempete-banq-handle") {
+            "fixture-tempete-borrow-job"
+        } else if request_text.contains("fixture-verger-montreal-handle") {
+            "fixture-verger-borrow-job"
         } else {
             "fixture-borrow-job"
         };
@@ -3522,6 +3620,28 @@ mod tests {
         fs::remove_dir(root).expect("remove private directory");
     }
 
+    /// Where the renderer actually put the button, rather than a coordinate
+    /// written down once and true by luck.
+    ///
+    /// This was `x=60&y=60`, which was inside the button only while nothing was
+    /// drawn above it. The status band is five millimetres tall and pushed the
+    /// whole content area down past that point, and a tap that lands on nothing
+    /// leaves the caller waiting for an action frame that never comes.
+    fn drawn_button_centre(drawn: &Screen) -> (i32, i32) {
+        drawn
+            .layout_with(&profile_metrics(), &app_chrome(drawn))
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, kobo_ui::LayoutKind::Button(..)))
+            .map(|node| {
+                (
+                    node.rect.x + node.rect.width / 2,
+                    node.rect.y + node.rect.height / 2,
+                )
+            })
+            .expect("the button is laid out")
+    }
+
     #[test]
     fn app_server_handshakes_renders_and_returns_actions() {
         let root = private_temp_dir();
@@ -3595,10 +3715,16 @@ mod tests {
         }
         assert!(!session.screen().nodes.is_empty());
 
+        let button = drawn_button_centre(&session.screen());
         let browser = thread::spawn(move || -> io::Result<()> {
             let mut stream = TcpStream::connect(address)?;
+            let body = format!("x={}&y={}", button.0, button.1);
             stream.write_all(
-                b"POST /touch HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\nx=60&y=60",
+                format!(
+                    "POST /touch HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
             )?;
             let mut response = String::new();
             stream.read_to_string(&mut response)?;
@@ -3771,9 +3897,14 @@ mod tests {
         assert!(author.contains("Résolument moi !"));
 
         // The order is a facet of the list, not a different list.
+        let issued = pret_get("/browse?page=1&category=Y");
+        assert!(
+            issued.contains(r#""publications":[{"handle":"fixture-anniversaire""#),
+            "{issued}"
+        );
         let recent = pret_get("/browse?page=1&category=Y&sort=created_at_desc");
         assert!(
-            recent.contains(r#""publications":[{"handle":"fixture-volant""#),
+            recent.contains(r#""publications":[{"handle":"fixture-noel""#),
             "{recent}"
         );
     }
@@ -3786,7 +3917,7 @@ mod tests {
         assert!(with_pdf.contains("Le guide illustré du potager"));
         assert!(with_pdf.contains(r#""pdf_only":true"#));
         // And a book that has an EPUB is not a PDF book.
-        assert!(with_pdf.contains(r#""handle":"fixture-mensonges","title":"Mensonges","authors":["Marilou Addison"],"isbn":"9782898592102","pdf_only":false"#));
+        assert!(with_pdf.contains(r#""handle":"fixture-mensonges","title":"Mensonges","authors":["Marilou Addison"],"isbn":"9780000000000","pdf_only":false"#));
         // The home page is a merged list, so it never carries one at all.
         assert!(!pret_get("/discovery").contains("Le guide illustré du potager"));
     }

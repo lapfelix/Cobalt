@@ -7,10 +7,10 @@ tap Search
 wait-for Find a book
 clean
 tap Title, author, or ISBN
-type dune
+type potager
 tap Search
 wait-for Results
-tap Dune
+tap Le potager du fixture
 wait-for Book details
 scenario offline
 tap Montréal

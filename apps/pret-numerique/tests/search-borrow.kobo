@@ -1,5 +1,6 @@
 # Fixture-backed happy path. The proxy fixture returns an available Montréal
-# copy of "Dune" and then walks the borrow from queued to complete, so this
+# copy of the demonstration title and then walks the borrow from queued to
+# complete, so this
 # also drives the two-second poll and the progress drawn on the book itself.
 clean
 # Discover is the first screen now, and Search is on its own bar.
@@ -7,12 +8,12 @@ tap Search
 wait-for Find a book
 clean
 tap Title, author, or ISBN
-type dune
+type potager
 tap Search
 wait-for Results
 expect Results
 clean
-tap Dune
+tap Le potager du fixture
 wait-for Book details
 expect Book details
 expect Tapping one borrows
@@ -20,7 +21,7 @@ expect Tapping one borrows
 tap Montréal
 wait-for Waiting to start
 expect Book details
-expect Dune
+expect Le potager du fixture
 clean
 wait-for It is in your Library now
 expect Open Library

@@ -1,11 +1,12 @@
-# Discover is the first screen, and the merged answer is what its rows say: a
-# book out at Montréal and free at BAnQ reads as available, and names BAnQ.
-# Then a whole list, paged with buttons at both ends.
+# Discover is the first screen. A row says whether a book can be had and no
+# more -- which library is the book screen's business, because that is where a
+# library is chosen -- and a title five people wrote is named by the first of
+# them and a count. Then a whole list, paged with buttons at both ends.
 clean
 expect Prêt numérique
 expect Recent releases
-expect Available now at BAnQ
-expect Every copy is out at Montréal and BAnQ
+expect A. Michaud · Available
+expect All copies out
 expect Page 1 of 3
 expect Previous page
 expect Next page
@@ -16,8 +17,12 @@ tap Previous page
 wait-for Recent releases
 clean
 tap See the whole list
-wait-for Recent acquisitions
+wait-for Filters
 expect Recent releases
+# A title five people wrote is named by the first of them and a count, on one
+# line, where the whole list was two.
+expect J. Boisvert +4
+expect-missing Pierrette Dubé
 clean
 expect Page 1
 tap Next page
@@ -28,5 +33,7 @@ wait-for Page 1
 clean
 tap Mensonges
 wait-for Book details
+# The book screen still names every library and its state: it is the only
+# screen where that can be acted on.
 expect Available now at Montréal
 clean

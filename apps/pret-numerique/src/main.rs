@@ -46,36 +46,35 @@ const MAX_DESCRIPTION_CHARS: usize = 4000;
 const MAX_ERROR_CHARS: usize = 160;
 const MAX_JOBS: usize = 24;
 const POLL_SECONDS: u32 = 2;
-/// What one row of a list costs, and what a page spends before the first one.
+/// The floor and ceiling on how many rows a page of a list holds.
 ///
 /// E Ink does not scroll, so every list is paged, and the layout engine stops
 /// at the bottom of the content area and drops the rest in silence: a page one
-/// row too tall loses that row with nothing on the panel to say so. These two
-/// numbers turn the panel's content height into a row count, measured against
-/// the real typeface -- a Clara holds five rows under a heading and the page
-/// controls, a Nia three, an Elipsa more than either. The layout tests hold
-/// every screen on every panel to what they work out.
-const PAGE_ROW_STRIDE: i32 = 174;
-const PAGE_FURNITURE: i32 = 320;
+/// row too tall loses that row with nothing on the panel to say so. How many
+/// rows a page holds is measured -- see [`PretNumerique::list_rows`] -- and
+/// these only bound the answer.
 const MIN_PAGE_ROWS: usize = 3;
-/// What a section heading and a line of small print cost, for the screens that
-/// have to work out what is left after them. Both are a fraction of a row, so
-/// counting them as whole ones would cost Library half its page.
-const SECTION_COST: i32 = 42;
-const LINE_COST: i32 = 42;
-/// What a definition list charges for one fact, what a book's screen has spent
-/// before the first of them, and what one library's row under them costs.
+/// What a book's screen has spent before its first fact, and what the ways on
+/// below the libraries cost.
 ///
 /// The furniture is the book's title and the section and line that offer the
 /// libraries: everything a borrow needs and none of it optional. A library's own
-/// row is charged separately because how many there are is the book's business,
-/// and it is cheaper than [`PAGE_ROW_STRIDE`] -- a row carrying a library's name
-/// and four words under it sits at a row's floor, where a list of book titles is
-/// a list of two-line ones. Measured against the real typeface like the page
-/// numbers above, and held to it by the layout tests.
+/// row is charged separately because how many there are is the book's business.
+/// A way on is a section and a row together. The blurb's row carries two lines
+/// of the blurb where the author's carries a name, and that second line is the
+/// difference between a book's screen that fits and one whose last row is drawn
+/// under the bar.
+///
+/// These four are the only measurements still written down rather than asked
+/// for, because a book's screen is one arrangement rather than a list of like
+/// things and there is nothing on it to measure a page of. They are read off a
+/// laid-out screen on the panel this app ships to, and the layout tests hold
+/// every panel to what they work out.
 const FACT_COST: i32 = 58;
-const DETAIL_FURNITURE: i32 = 268;
+const DETAIL_FURNITURE: i32 = 222;
 const LIBRARY_ROW_COST: i32 = 153;
+const DETAIL_EXTRA_COST: i32 = 224;
+const BLURB_EXTRA_LINE: i32 = 46;
 /// The facts a book's screen keeps whatever the panel: who wrote it, and which
 /// library has a copy. Nothing about a borrow makes sense without both.
 const MIN_DETAIL_FACTS: usize = 2;
@@ -85,7 +84,7 @@ const MIN_DETAIL_FACTS: usize = 2;
 /// a request that failed comes to on the narrowest panel. A page measured as
 /// though nothing were ever wrong loses its last lines the first time
 /// something is, and the reader has no way to tell that it did.
-const NOTE_COST: i32 = 4 * LINE_COST + 40;
+const NOTE_LINES: i32 = 4;
 
 const MAX_PAGE_ROWS: usize = 8;
 /// How many of the libraries' lists Discover draws at once.
@@ -108,6 +107,7 @@ const SEARCH: &str = "open-search";
 const CATEGORIES: &str = "open-categories";
 const HOLDS: &str = "open-holds";
 const SHOW_PDF: &str = "show-pdf";
+const FILTERS: &str = "open-filters";
 const RELATED: &str = "open-related";
 const DESCRIPTION: &str = "open-description";
 const PREVIOUS_PAGE: &str = "previous-page";
@@ -135,6 +135,18 @@ enum View {
     Categories,
     /// One list of books: a discovery group, a category, or an author.
     Browse,
+    /// How a list is ordered and what it leaves out, with a screen of its own.
+    ///
+    /// These were chips on the list itself, and they were unreachable twice
+    /// over. The run only appeared while the catalogue had offered more than
+    /// one order, so a reply carrying fewer facets than the one before it took
+    /// the PDF toggle -- which is this app's own control and nothing to do with
+    /// the catalogue -- away with it, and nothing on the screen could bring it
+    /// back. And a wrapped run of them cost a line the page budget did not
+    /// charge for, which pushed the buttons that turn the page under the bar.
+    /// A screen always exists, always draws its own controls, and can say that
+    /// something is unavailable instead of not being there.
+    Filters,
     Search,
     Results,
     Detail,
@@ -277,6 +289,18 @@ struct Category {
 struct Sort {
     key: String,
     label: String,
+}
+
+/// One run of controls on the filters screen.
+///
+/// `empty` is what the group says when it has no controls to offer, which is
+/// the whole reason this screen exists: a facet the catalogue did not send is a
+/// sentence saying there was nothing to choose from, never an absence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FilterGroup {
+    title: &'static str,
+    empty: &'static str,
+    chips: Vec<(String, String, bool)>,
 }
 
 /// What is being browsed, and how. Held whole so that going back to a list
@@ -440,6 +464,13 @@ struct PretNumerique {
     browse: BrowseQuery,
     browsed: Vec<Publication>,
     sorts: Vec<Sort>,
+    /// Which page of the filters screen is showing.
+    ///
+    /// Two groups fit any panel today. It pages anyway, because the catalogue
+    /// offers audience, availability, language and format as well, and a screen
+    /// that grew a fifth group without paging would lose it the way the chips
+    /// it replaced lost the page controls.
+    filters_page: usize,
     /// What the server said about the page it just sent.
     browse_paging: Paging,
     /// Which panel-sized slice of that page is drawn. The server decides how
@@ -505,6 +536,7 @@ impl Default for PretNumerique {
             browse: BrowseQuery::default(),
             browsed: Vec::new(),
             sorts: Vec::new(),
+            filters_page: 0,
             browse_paging: Paging::default(),
             browse_offset: 0,
             browse_number: 1,
@@ -572,6 +604,7 @@ impl PretNumerique {
             View::Discover => self.discover_screen(),
             View::Categories => self.categories_screen(),
             View::Browse => self.browse_screen(),
+            View::Filters => self.filters_screen(),
             View::Search => self.search_screen(),
             View::Results => self.results_screen(),
             View::Detail => self.detail_screen(),
@@ -747,12 +780,13 @@ impl PretNumerique {
         if self.results.is_empty() {
             screen = screen.empty_state("No titles found.");
         } else {
-            let paging = Paging::sized(self.results_page, self.results.len(), self.page_rows());
-            screen = publication_rows(
+            let per_page = self.results_rows_per_page();
+            let paging = Paging::sized(self.results_page, self.results.len(), per_page);
+            screen = self.publication_rows(
                 screen,
                 "result",
-                self.results_page * self.page_rows(),
-                slice_of(&self.results, self.results_page, self.page_rows()),
+                self.results_page * per_page,
+                slice_of(&self.results, self.results_page, per_page),
             );
             screen = Self::page_controls(screen, paging);
         }
@@ -793,7 +827,7 @@ impl PretNumerique {
                     .map(|(book, publication)| {
                         (
                             format!("group.{index}.book.{book}"),
-                            publication.title.clone(),
+                            self.row_title(&publication.title),
                             publication_summary(publication),
                             Glyph::Book,
                         )
@@ -839,22 +873,16 @@ impl PretNumerique {
         if self.categories.is_empty() {
             screen = screen.empty_state("No subjects to browse yet.");
         } else {
-            let paging = Paging::sized(
-                self.categories_page,
-                self.categories.len(),
-                self.page_rows(),
-            );
+            let per_page = self.page_rows();
+            let paging = Paging::sized(self.categories_page, self.categories.len(), per_page);
             screen = screen.rows(
-                slice_of(&self.categories, self.categories_page, self.page_rows())
+                slice_of(&self.categories, self.categories_page, per_page)
                     .iter()
                     .enumerate()
                     .map(|(offset, category)| {
                         (
-                            format!(
-                                "category.{}",
-                                self.categories_page * self.page_rows() + offset
-                            ),
-                            category.name.clone(),
+                            format!("category.{}", self.categories_page * per_page + offset),
+                            self.row_title(&category.name),
                             category_summary(category),
                             Glyph::Book,
                         )
@@ -866,36 +894,30 @@ impl PretNumerique {
     }
 
     /// One list of books: a discovery group, a subject, or an author.
+    ///
+    /// The list's name is the bar's title rather than a heading. A subject name
+    /// arrives from the catalogue and "Enfant, adolescent et enseignement" is
+    /// two lines of display type -- a row of books, spent saying again what the
+    /// reader just tapped -- where the bar sets it on one line and ellipsises
+    /// what does not fit. That is the renderer's own rule for a bar title, so
+    /// the name is on one line by construction rather than by arithmetic here.
     fn browse_screen(&self) -> Screen {
         let mut screen = Self::nav(
             ScreenBuilder::new("browse")
-                .top_bar("Books")
-                .top_bar_action(BACK, "Back"),
+                .top_bar(if self.browse.title.is_empty() {
+                    "Books".to_owned()
+                } else {
+                    self.browse.title.clone()
+                })
+                .top_bar_action(BACK, "Back")
+                .top_bar_action(FILTERS, "Filters"),
             0,
-        )
-        .heading(if self.browse.title.is_empty() {
-            "Books".to_owned()
-        } else {
-            self.browse.title.clone()
-        });
+        );
         screen = self.note_block(screen, BannerLevel::Attention);
-        // The orders this list can be read in, and the one thing that changes
-        // what is in it. Both are facets of the same list, so they are the same
-        // run of chips rather than a second control in a second place.
-        if self.sorts.len() > 1 {
-            screen = screen.chips(
-                self.sorts
-                    .iter()
-                    .enumerate()
-                    .map(|(index, sort)| {
-                        (
-                            format!("sort.{index}"),
-                            sort.label.clone(),
-                            self.browse.sort.as_deref() == Some(sort.key.as_str()),
-                        )
-                    })
-                    .chain([(SHOW_PDF.to_owned(), "Show PDF".to_owned(), self.show_pdf)]),
-            );
+        // What the filters screen has been told, in one line, so that the
+        // reader can see what is applied without opening it.
+        if let Some(applied) = self.applied_filters() {
+            screen = screen.secondary(applied);
         }
         if self.browsed.is_empty() && self.awaiting(RequestKind::Browse) {
             return screen.skeleton(self.skeleton_lines()).build();
@@ -904,7 +926,7 @@ impl PretNumerique {
             screen = screen.empty_state("No books in this list.");
         } else {
             let per_page = self.browse_rows_per_page();
-            screen = publication_rows(
+            screen = self.publication_rows(
                 screen,
                 "browse",
                 self.browse_offset * per_page,
@@ -915,6 +937,43 @@ impl PretNumerique {
         screen.build()
     }
 
+    /// How the list is ordered and what it leaves out.
+    ///
+    /// Every control here is drawn whatever the catalogue said. An order the
+    /// catalogue did not offer is a sentence saying so, never a missing chip:
+    /// the reader has to be able to see that there was nothing to choose from,
+    /// and the PDF filter -- which is this app's, not the catalogue's -- has to
+    /// be reachable either way.
+    fn filters_screen(&self) -> Screen {
+        let mut screen = Self::nav(
+            ScreenBuilder::new("filters")
+                .top_bar("Filters")
+                .top_bar_action(BACK, "Done"),
+            0,
+        );
+        screen = self.note_block(screen, BannerLevel::Info);
+        let groups = self.filter_groups();
+        let per_page = self.filter_groups_per_page(&groups);
+        let page = self
+            .filters_page
+            .min(groups.len().saturating_sub(1) / per_page);
+        for group in slice_of(&groups, page, per_page) {
+            screen = screen.section(group.title);
+            screen = if group.chips.is_empty() {
+                screen.secondary(group.empty)
+            } else {
+                screen.chips(group.chips.iter().cloned())
+            };
+        }
+        Self::page_controls(screen, Paging::sized(page, groups.len(), per_page)).build()
+    }
+
+    /// Books like the one being read about.
+    ///
+    /// The book's own title is the bar's, for the reason
+    /// [`Self::browse_screen`] gives: a title arrives from the catalogue, and
+    /// display type set across two lines of it costs a row of the list it is
+    /// introducing.
     fn related_screen(&self) -> Screen {
         let title = self
             .detail
@@ -922,11 +981,10 @@ impl PretNumerique {
             .map_or_else(|| "This book".to_owned(), |book| book.title.clone());
         let mut screen = Self::nav(
             ScreenBuilder::new("related")
-                .top_bar("Books like this")
+                .top_bar(format!("Like {title}"))
                 .top_bar_action(BACK, "Back"),
             0,
         )
-        .heading(format!("Like {title}"))
         .secondary("Same author, or the same kind of book, at either library.");
         screen = self.note_block(screen, BannerLevel::Attention);
         if self.related.is_empty() && self.awaiting(RequestKind::Related) {
@@ -935,12 +993,13 @@ impl PretNumerique {
         if self.related.is_empty() {
             screen = screen.empty_state("Nothing close enough to suggest.");
         } else {
-            let paging = Paging::sized(self.related_page, self.related.len(), self.page_rows());
-            screen = publication_rows(
+            let per_page = self.related_rows_per_page();
+            let paging = Paging::sized(self.related_page, self.related.len(), per_page);
+            screen = self.publication_rows(
                 screen,
                 "related",
-                self.related_page * self.page_rows(),
-                slice_of(&self.related, self.related_page, self.page_rows()),
+                self.related_page * per_page,
+                slice_of(&self.related, self.related_page, per_page),
             );
             screen = Self::page_controls(screen, paging);
         }
@@ -966,7 +1025,7 @@ impl PretNumerique {
         if holds.is_empty() {
             screen = screen.empty_state("You are not waiting for anything.");
         } else {
-            let per_page = self.page_rows().saturating_sub(2).max(2);
+            let per_page = self.holds_rows_per_page();
             let paging = Paging::sized(self.holds_page, holds.len(), per_page);
             screen = screen.rows(
                 slice_of(&holds, self.holds_page, per_page)
@@ -975,7 +1034,7 @@ impl PretNumerique {
                     .map(|(offset, hold)| {
                         (
                             format!("hold.{}", self.holds_page * per_page + offset),
-                            hold.title.clone(),
+                            self.row_title(&hold.title),
                             hold_summary(hold),
                             Glyph::Bookmark,
                         )
@@ -1188,7 +1247,7 @@ impl PretNumerique {
                         let job = self.jobs.get(index)?;
                         Some((
                             format!("resolve.{index}"),
-                            job.title.clone(),
+                            self.row_title(&job.title),
                             unresolved_summary(job),
                             Glyph::Circle,
                         ))
@@ -1237,7 +1296,7 @@ impl PretNumerique {
                     .map(|(offset, book)| {
                         (
                             format!("book.{}", base + offset),
-                            book.title.clone(),
+                            self.row_title(&book.title),
                             self.book_summary(book),
                             Glyph::Bookmark,
                         )
@@ -1368,22 +1427,181 @@ impl PretNumerique {
         }
     }
 
+    /// One page of a list of books.
+    fn publication_rows(
+        &self,
+        screen: ScreenBuilder,
+        prefix: &str,
+        base: usize,
+        publications: &[Publication],
+    ) -> ScreenBuilder {
+        screen.rows(
+            publications
+                .iter()
+                .enumerate()
+                .map(|(offset, publication)| {
+                    (
+                        format!("{prefix}.{}", base + offset),
+                        self.row_title(&publication.title),
+                        publication_summary(publication),
+                        Glyph::Book,
+                    )
+                }),
+        )
+    }
+
     /// A wait drawn at the height of the page it is standing in for.
     fn skeleton_lines(&self) -> u8 {
         u8::try_from(self.page_rows()).unwrap_or(3)
     }
 
-    /// How tall this panel's content area is.
+    /// How tall this panel's content area is -- the screen's, not the panel's.
+    ///
+    /// `prose_area` describes the panel. It knows about the top bar and the
+    /// navigation bar because this app asked for both, and nothing at all about
+    /// the strip carrying the clock, the radio and the battery, which the
+    /// runtime lays out above everything else and never tells an application
+    /// about. So it comes off here.
+    ///
+    /// Fifty-nine pixels on a Clara. Every budget below was written against the
+    /// panel rather than the screen and was therefore that much too generous on
+    /// every real device, while the simulator and the layout tests -- neither of
+    /// which drew the band -- agreed with the arithmetic and passed. The browse
+    /// page controls were the first thing to be sheared off by the bar, and the
+    /// book screen's last row went with them.
     fn content_height(&self) -> i32 {
-        self.metrics.prose_area(true, true).height
+        (self.metrics.prose_area(true, true).height - self.metrics.status_band_height()).max(1)
     }
 
-    /// How many rows of a list this panel holds on one page.
-    fn page_rows(&self) -> usize {
-        let rows = (self.content_height() - PAGE_FURNITURE) / PAGE_ROW_STRIDE;
-        usize::try_from(rows)
-            .unwrap_or(MIN_PAGE_ROWS)
+    /// The width a row's words are set across, which is not the panel's.
+    ///
+    /// A row reserves the lead column whether or not it has a lead, so that a
+    /// list of rows with mixed leads keeps one text margin.
+    fn row_width(&self) -> i32 {
+        kobo_ui::row_text_width(&self.metrics, self.metrics.prose_area(true, true))
+    }
+
+    /// A row's title, on one line, ellipsised where it did not fit.
+    ///
+    /// This is what lets [`Self::list_rows`] measure one row and know every
+    /// row. A title that wraps makes its row a fifth taller than the one above
+    /// it, so a page counted from a one-line row and drawn with two wrapped
+    /// titles overflows -- and a list whose rows all differ in height is one
+    /// the eye has to re-measure on every line anyway.
+    fn row_title(&self, title: &str) -> String {
+        kobo_ui::one_line(title, self.row_width(), kobo_ui::FontSize::Body)
+    }
+
+    /// One gap: the step everything on a screen is spaced by.
+    fn gap(&self) -> i32 {
+        self.metrics.space(Space::Tight)
+    }
+
+    /// What a paged screen spends under its last row.
+    ///
+    /// A gap, the line that says which page this is, another gap, and the band
+    /// that turns it. Reserved before the rows are counted, because a page
+    /// measured without it comes back one row too many and that row is drawn
+    /// under the controls and clipped by the bar.
+    fn page_tail(&self) -> i32 {
+        2 * self.gap()
+            + kobo_ui::FontSize::Caption.line_height()
+            + self
+                .metrics
+                .touch_target_default()
+                .max(self.metrics.touch_target_minimum())
+    }
+
+    /// What one screen heading costs the list under it.
+    fn heading_cost(&self) -> i32 {
+        kobo_ui::FontSize::for_heading_level(1).line_height() + self.gap()
+    }
+
+    /// What one line of small print costs, the gap under it included.
+    fn line_cost(&self) -> i32 {
+        kobo_ui::FontSize::Caption.line_height() + self.gap()
+    }
+
+    /// What one line of body text costs. No gap: a block of prose is charged as
+    /// its lines plus one gap, not as a gap per line.
+    fn text_line_cost() -> i32 {
+        kobo_ui::FontSize::Body.line_height()
+    }
+
+    /// What one section header costs, including the air a section is given
+    /// above and below it.
+    fn section_cost(&self) -> i32 {
+        kobo_ui::FontSize::Caption.line_height() + 2 * self.gap()
+    }
+
+    /// What one *row* of chips costs. A run of them is charged by the row,
+    /// because the renderer wraps them: four French facet names are two rows on
+    /// a six inch panel, and the row the arithmetic did not charge for was the
+    /// one that pushed the page controls under the bar.
+    fn chip_row_cost(&self) -> i32 {
+        self.metrics
+            .touch_target_default()
+            .max(self.metrics.touch_target_minimum())
+            + self.gap()
+    }
+
+    /// How many rows a wrapped run of chips is laid out on.
+    ///
+    /// The renderer's own arm, followed step for step: a chip is as wide as its
+    /// label and two pads, it is never wider than the content, and it starts a
+    /// new row when it will not fit on this one. Guessing instead is how the
+    /// browse screen came to be a line taller than its budget said.
+    fn chip_rows(&self, labels: &[String]) -> i32 {
+        let width = self.metrics.prose_area(true, true).width;
+        let pad = self.metrics.space(Space::Small);
+        let gap = self.gap();
+        let mut rows = 1;
+        let mut used = 0;
+        for label in labels.iter().take(kobo_sdk::MAX_CHIPS) {
+            let label =
+                kobo_ui::one_line(label, (width - pad * 2).max(1), kobo_ui::FontSize::Caption);
+            let chip =
+                (kobo_ui::measure_text(&label, kobo_ui::FontSize::Caption).0 + pad * 2).min(width);
+            if used > 0 && used + chip > width {
+                rows += 1;
+                used = 0;
+            }
+            used += chip + gap;
+        }
+        rows
+    }
+
+    /// How many rows fit in what is left of the screen after `spent`.
+    ///
+    /// Asked of the renderer rather than worked out here. A row's height and
+    /// the separator between two of them are the panel's business, every panel
+    /// answers differently, and the app that wrote the answer down was wrong on
+    /// two of the three it draws to. Every row on a paged screen carries one
+    /// line of title and one line of summary -- see [`Self::row_title`] -- so
+    /// measuring a sample of them measures all of them.
+    ///
+    /// `want` is asked for rather than assumed because a screen with sections
+    /// above its list has rows above its list: charging those as rows is the
+    /// only way to charge them at what they cost, separators included.
+    fn rows_that_fit(&self, spent: i32, want: usize) -> usize {
+        let mut area = self.metrics.prose_area(true, true);
+        area.height = (self.content_height() - self.page_tail() - spent).max(1);
+        let sample = vec![("One line of title", "One line of summary"); want.max(1)];
+        kobo_ui::paginate_rows(&sample, &self.metrics, area)
+            .first()
+            .map_or(1, Vec::len)
+    }
+
+    /// How many rows of a list fit under `spent` pixels of whatever the screen
+    /// puts above it.
+    fn list_rows(&self, spent: i32) -> usize {
+        self.rows_that_fit(spent, MAX_PAGE_ROWS)
             .clamp(MIN_PAGE_ROWS, MAX_PAGE_ROWS)
+    }
+
+    /// How many rows a list under a screen heading holds on one page.
+    fn page_rows(&self) -> usize {
+        self.list_rows(self.heading_cost())
     }
 
     /// How many books a discovery list shows before offering the rest of it.
@@ -1424,15 +1642,22 @@ impl PretNumerique {
     ///
     /// The libraries are counted rather than assumed, because their rows are
     /// half of what the screen spends: a book only one library carries has room
-    /// for five facts where a book both of them carry has room for three.
+    /// for four facts where a book both of them carry has room for two.
+    ///
+    /// The gap given back is the one the last fact does not pay for, and it is
+    /// worth a whole fact on a six inch panel: without it the arithmetic said
+    /// one fact where two were drawn perfectly well, and the answer had to be
+    /// rescued by [`MIN_DETAIL_FACTS`] instead of being right.
     fn detail_fact_rows(&self, libraries: usize) -> usize {
         let extras = i32::try_from(self.detail_extras()).unwrap_or(0);
+        let blurb = if extras >= 2 { BLURB_EXTRA_LINE } else { 0 };
         let libraries = i32::try_from(libraries).unwrap_or(2).max(1);
         let room = self.content_height()
             - DETAIL_FURNITURE
             - libraries * LIBRARY_ROW_COST
-            - extras * (SECTION_COST + PAGE_ROW_STRIDE);
-        usize::try_from(room / FACT_COST)
+            - extras * DETAIL_EXTRA_COST
+            - blurb;
+        usize::try_from((room + self.gap()) / FACT_COST)
             .unwrap_or(MIN_DETAIL_FACTS)
             .max(MIN_DETAIL_FACTS)
     }
@@ -1441,10 +1666,10 @@ impl PretNumerique {
     ///
     /// Measured against the panel rather than counted in characters, because a
     /// page of one long paragraph holds half again what a page of short ones
-    /// does. The room is the content area less what this screen puts under the
-    /// words: the strip the runtime keeps for the clock, the line that says
-    /// which page this is, and the band that turns it. Measuring without those
-    /// comes back a page too full, and the layout engine drops the overflow in
+    /// does. The room is the screen's content area -- which already excludes the
+    /// strip the runtime keeps for the clock -- less the line that says which
+    /// page this is and the band that turns it. Measuring without those comes
+    /// back a page too full, and the layout engine drops the overflow in
     /// silence.
     fn description_pages(&self) -> Vec<Vec<String>> {
         let Some(description) = self
@@ -1455,14 +1680,11 @@ impl PretNumerique {
             return Vec::new();
         };
         let mut area = self.metrics.prose_area(true, true);
-        let mut spent = self.metrics.status_band_height()
-            + LINE_COST
-            + self.metrics.touch_target_default()
-            + 2 * area.gap;
+        let mut spent = self.page_tail();
         if self.note.is_some() {
-            spent += NOTE_COST;
+            spent += NOTE_LINES * self.line_cost() + self.gap();
         }
-        area.height = (area.height - spent).max(1);
+        area.height = (self.content_height() - spent).max(1);
         kobo_ui::paginate(description, area)
     }
 
@@ -1523,29 +1745,62 @@ impl PretNumerique {
     /// The sections above the list are conditional, so a fixed page height
     /// would push the last loans off the panel on exactly the days something
     /// needs a person. The list gets what is left.
+    ///
+    /// The rows those sections carry are charged as rows rather than as pixels,
+    /// because that is what they are: a section's row costs the same separator
+    /// as a loan's, and the run of filter chips at the top of this screen was
+    /// never charged for at all.
     fn library_rows_per_page(&self) -> usize {
-        let mut room = self.content_height() - PAGE_FURNITURE;
+        let mut spent = self.chip_row_cost();
+        let mut above = 0;
         let unresolved = self.unresolved_jobs().len().min(self.attention_rows());
         if unresolved > 0 {
-            room -= SECTION_COST + i32::try_from(unresolved).unwrap_or(1) * PAGE_ROW_STRIDE;
+            spent += self.section_cost();
+            above += unresolved;
         }
         if !self.filtered_holds().is_empty() {
-            room -= SECTION_COST + PAGE_ROW_STRIDE;
+            spent += self.section_cost();
+            above += 1;
         }
         if self.unheld_loans() > 0 {
-            room -= LINE_COST;
+            spent += self.line_cost();
         }
-        usize::try_from(room / PAGE_ROW_STRIDE).unwrap_or(1).max(1)
+        self.rows_that_fit(spent, above + MAX_PAGE_ROWS)
+            .saturating_sub(above)
+            .clamp(1, MAX_PAGE_ROWS)
     }
 
-    /// How many books a browsed page shows, with the orders it can be read in
-    /// taking a line of their own.
+    /// How many books a browsed page shows.
+    ///
+    /// Its name is in the bar rather than in a heading, so a browse page is the
+    /// list and the controls that turn it and nothing else -- less the one line
+    /// that reports what the filters screen has been told, when it has been
+    /// told anything.
     fn browse_rows_per_page(&self) -> usize {
-        if self.sorts.len() > 1 {
-            self.page_rows().saturating_sub(1).max(2)
+        self.list_rows(if self.applied_filters().is_some() {
+            self.line_cost()
         } else {
-            self.page_rows()
-        }
+            0
+        })
+    }
+
+    /// How many titles a page of search results shows: a heading and the line
+    /// repeating what was searched for come off it first.
+    fn results_rows_per_page(&self) -> usize {
+        self.list_rows(self.heading_cost() + Self::text_line_cost() + self.gap())
+    }
+
+    /// How many neighbours a page shows. The book's own title is in the bar, so
+    /// only the line explaining what "like this" means comes off the page.
+    fn related_rows_per_page(&self) -> usize {
+        self.list_rows(self.line_cost())
+    }
+
+    /// How many queued books a page shows, under the heading and the two lines
+    /// saying where a hold can be cancelled.
+    fn holds_rows_per_page(&self) -> usize {
+        self.list_rows(self.heading_cost() + 2 * Self::text_line_cost() + self.gap())
+            .max(2)
     }
 
     /// Which way a browse can still be turned.
@@ -1561,6 +1816,102 @@ impl PretNumerique {
             has_next: (self.browse_offset + 1) * self.browse_rows_per_page() < self.browsed.len()
                 || self.browse_paging.has_next,
         }
+    }
+
+    /// Everything the filters screen offers, as data.
+    ///
+    /// A list rather than two hard-coded controls, because the catalogue also
+    /// takes an audience, an availability, a language and a nature, and a later
+    /// wave adds them. Adding one is adding an entry here; the screen already
+    /// knows how to page what it cannot fit.
+    ///
+    /// One limit is upstream and permanent: two subjects are not combinable --
+    /// the catalogue answers the second one and ignores the first -- so a
+    /// subject is never a group here.
+    fn filter_groups(&self) -> Vec<FilterGroup> {
+        vec![
+            FilterGroup {
+                title: "Order",
+                empty: "This list comes in one order only.",
+                chips: self
+                    .sorts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, sort)| {
+                        (
+                            format!("sort.{index}"),
+                            sort.label.clone(),
+                            self.browse.sort.as_deref() == Some(sort.key.as_str()),
+                        )
+                    })
+                    .collect(),
+            },
+            FilterGroup {
+                title: "Format",
+                empty: "",
+                // Never conditional on anything the server said. A PDF on a six
+                // inch panel is a photograph of a paper page, so this is the
+                // app's own filter, and the reader has to be able to reach it
+                // whether or not the catalogue offered any orders at all.
+                chips: vec![(SHOW_PDF.to_owned(), "Include PDF".to_owned(), self.show_pdf)],
+            },
+        ]
+    }
+
+    /// How many filter groups fit on one page of the filters screen.
+    fn filter_groups_per_page(&self, groups: &[FilterGroup]) -> usize {
+        let room = self.content_height() - self.page_tail();
+        let mut taken = 0;
+        let mut fit = 0;
+        for group in groups {
+            let labels = group
+                .chips
+                .iter()
+                .map(|(_, label, _)| label.clone())
+                .collect::<Vec<_>>();
+            let body = if labels.is_empty() {
+                self.line_cost()
+            } else {
+                self.chip_rows(&labels) * self.chip_row_cost()
+            };
+            taken += self.section_cost() + body;
+            if taken > room && fit > 0 {
+                break;
+            }
+            fit += 1;
+        }
+        fit.max(1)
+    }
+
+    /// What the filters screen has been told, in one line, or nothing when it
+    /// has been told nothing.
+    ///
+    /// Only what differs from the plain list: a reader who has chosen nothing
+    /// should not be reading a line about it, and the line costs the list a row
+    /// once it is there.
+    fn applied_filters(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(sort) = self.browse.sort.as_deref() {
+            if let Some(label) = self
+                .sorts
+                .iter()
+                .find(|candidate| candidate.key == sort)
+                .map(|candidate| candidate.label.clone())
+            {
+                parts.push(label);
+            }
+        }
+        if self.show_pdf {
+            parts.push("PDF included".to_owned());
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(kobo_ui::one_line(
+            &parts.join(" · "),
+            self.metrics.prose_area(true, true).width,
+            kobo_ui::FontSize::Caption,
+        ))
     }
 
     fn resolve_target(&self) -> Option<&Job> {
@@ -2447,6 +2798,7 @@ impl PretNumerique {
         self.browse_offset = 0;
         self.browse_number = 1;
         self.browse_from_end = false;
+        self.filters_page = 0;
         self.start_browse(context);
     }
 
@@ -2465,7 +2817,7 @@ impl PretNumerique {
                     self.results_page,
                     forward,
                     self.results.len(),
-                    self.page_rows(),
+                    self.results_rows_per_page(),
                 );
             }
             View::Related => {
@@ -2473,8 +2825,13 @@ impl PretNumerique {
                     self.related_page,
                     forward,
                     self.related.len(),
-                    self.page_rows(),
+                    self.related_rows_per_page(),
                 );
+            }
+            View::Filters => {
+                let groups = self.filter_groups();
+                let per_page = self.filter_groups_per_page(&groups);
+                self.filters_page = turned(self.filters_page, forward, groups.len(), per_page);
             }
             View::Categories => {
                 self.categories_page = turned(
@@ -2491,7 +2848,7 @@ impl PretNumerique {
             }
             View::Holds => {
                 let count = self.filtered_holds().len();
-                let per_page = self.page_rows().saturating_sub(2).max(2);
+                let per_page = self.holds_rows_per_page();
                 self.holds_page = turned(self.holds_page, forward, count, per_page);
             }
             View::Discover => {
@@ -2616,6 +2973,12 @@ impl KoboApp for PretNumerique {
             }
             return;
         }
+        if action == action_id(FILTERS) {
+            self.deeper(context, View::Filters);
+            self.filters_page = 0;
+            self.show(context);
+            return;
+        }
         if action == action_id(HOLDS) {
             self.deeper(context, View::Holds);
             self.holds_page = 0;
@@ -2673,8 +3036,10 @@ impl KoboApp for PretNumerique {
             self.show_pdf = !self.show_pdf;
             self.note = None;
             // On a list already on screen the change is what is in the list, so
-            // it is asked for again from its first page.
-            if self.view == View::Browse {
+            // it is asked for again from its first page. The filters screen is
+            // that list's own, so a change made there re-reads it too and the
+            // reader is left on the filters to make another.
+            if matches!(self.view, View::Browse | View::Filters) {
                 self.browse.page = 1;
                 self.browse_number = 1;
                 self.browse_offset = 0;
@@ -2926,12 +3291,87 @@ fn action_index(action: kobo_sdk::ActionId, prefix: &str, count: usize) -> Optio
     (0..count).find(|index| action == action_id(&format!("{prefix}.{index}")))
 }
 
+/// Everyone who wrote it, for the one screen with room to name them all.
 fn author_line(authors: &[String]) -> String {
     if authors.is_empty() {
         "Unknown author".to_owned()
     } else {
         authors.join(", ")
     }
+}
+
+/// The first author, shortened, and how many others there are.
+///
+/// A row has one line for everything under the title, and five Québécois names
+/// set end to end is two of them: "Jocelyn Boisvert, Julie Champagne, Denis
+/// Côté, Alexandre Côté-Fournier, Pierrette Dubé" cost a row of books to say
+/// what "J. Boisvert +4" says. The whole list is on the book's own screen,
+/// which is where a reader who wants it is going anyway.
+fn short_author_line(authors: &[String]) -> String {
+    match authors {
+        [] => "Unknown author".to_owned(),
+        [only] => shortened_name(only),
+        [first, rest @ ..] => format!("{} +{}", shortened_name(first), rest.len()),
+    }
+}
+
+/// A name as initials and a family name, where that is shorter than the name.
+///
+/// Written for the names these catalogues actually carry. A particle keeps its
+/// own words -- "Jean de la Fontaine" is not three given names -- and is known
+/// by its lower case, which is how French, Dutch and Spanish all write one. A
+/// hyphenated given name keeps both halves, because "M. Tremblay" cannot tell
+/// Marie-Ève from Marc-Antoine. A one-word name has nothing to shorten around,
+/// and a name whose short form is no shorter is left alone: "Ed Yong" is not
+/// improved by being called "E. Yong".
+fn shortened_name(name: &str) -> String {
+    let words = name.split_whitespace().collect::<Vec<_>>();
+    if words.len() < 2 {
+        return name.to_owned();
+    }
+    let family = words
+        .iter()
+        .position(|word| starts_lowercase(word))
+        .unwrap_or(words.len() - 1)
+        .min(words.len() - 1);
+    if family == 0 {
+        return name.to_owned();
+    }
+    let given = words[..family]
+        .iter()
+        .map(|word| initials_of(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let short = format!("{given} {}", words[family..].join(" "));
+    if short.chars().count() < name.chars().count() {
+        short
+    } else {
+        name.to_owned()
+    }
+}
+
+/// "Marie-Ève" as "M.-È.". Counted in characters and upper-cased through
+/// `char::to_uppercase`, because an accented capital is one character in this
+/// catalogue's names and half of them carry one.
+fn initials_of(word: &str) -> String {
+    word.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut initial = part
+                .chars()
+                .next()
+                .into_iter()
+                .flat_map(char::to_uppercase)
+                .collect::<String>();
+            initial.push('.');
+            initial
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn starts_lowercase(word: &str) -> bool {
+    word.chars().next().is_some_and(char::is_lowercase)
 }
 
 fn slice_of<T>(items: &[T], page: usize, per_page: usize) -> &[T] {
@@ -2982,6 +3422,24 @@ fn availability_summary(publication: &Publication) -> String {
     format!("Available now at {}", library_list(&available))
 }
 
+/// Whether a reader can have this now, in the fewest words that answer it.
+///
+/// A row does not say which library, and naming one was worse than useless
+/// here: "Every copy is out at Montréal · Goodreads 3.0/5" is a wrapped line
+/// under every title in the list, and the reader scanning that list has not yet
+/// decided which book they want, let alone which library to take it from. The
+/// book's own screen names every library and its state, and it is the only
+/// screen where that can be acted on -- the library chooser is on it.
+fn availability_state(publication: &Publication) -> &'static str {
+    if !publication.available_libraries().is_empty() {
+        "Available"
+    } else if publication.sources.is_empty() {
+        "Not available"
+    } else {
+        "All copies out"
+    }
+}
+
 fn publication_summary(publication: &Publication) -> String {
     let goodreads = publication
         .goodreads_rating
@@ -2992,29 +3450,8 @@ fn publication_summary(publication: &Publication) -> String {
     let format = if publication.pdf_only { " · PDF" } else { "" };
     format!(
         "{} · {}{format}{goodreads}",
-        author_line(&publication.authors),
-        availability_summary(publication)
-    )
-}
-
-fn publication_rows(
-    screen: ScreenBuilder,
-    prefix: &str,
-    base: usize,
-    publications: &[Publication],
-) -> ScreenBuilder {
-    screen.rows(
-        publications
-            .iter()
-            .enumerate()
-            .map(|(offset, publication)| {
-                (
-                    format!("{prefix}.{}", base + offset),
-                    publication.title.clone(),
-                    publication_summary(publication),
-                    Glyph::Book,
-                )
-            }),
+        short_author_line(&publication.authors),
+        availability_state(publication)
     )
 }
 
@@ -3992,8 +4429,8 @@ mod tests {
         resolve_explanation, settled_message, sign_in_advice, state_label, turned,
         unresolved_summary, Book, BrowseQuery, Category, Group, Job, Paging, PretNumerique,
         Publication, ShelfEntry, Sort, Source, View, Watch, ACKNOWLEDGE, API, BACK, CONFIRM_RETURN,
-        DESCRIPTION, NEXT_PAGE, PREVIOUS_PAGE, READER, RELATED, RETRY_HOOK, SEARCH, SHOW_PDF,
-        SUBMIT_SEARCH,
+        DESCRIPTION, FILTERS, NEXT_PAGE, PREVIOUS_PAGE, READER, RELATED, RETRY_HOOK, SEARCH,
+        SHOW_PDF, SUBMIT_SEARCH,
     };
     use kobo_sdk::{
         action_id, AppRunner, BannerLevel, Command, Context, DiagnosticSeverity, KoboApp,
@@ -4029,9 +4466,19 @@ mod tests {
         }
     }
 
-    /// The page height of the panel these tests measure against.
+    /// The page height of the panel these tests measure against. Each screen
+    /// spends a different amount above its list, so each is asked separately
+    /// rather than assuming they agree.
     fn rows() -> usize {
         PretNumerique::default().page_rows()
+    }
+
+    fn browse_rows() -> usize {
+        PretNumerique::default().browse_rows_per_page()
+    }
+
+    fn related_rows() -> usize {
+        PretNumerique::default().related_rows_per_page()
     }
 
     fn out_of_copies() -> Source {
@@ -4286,10 +4733,13 @@ mod tests {
         for fact in ["Fixture author", "April 2019", "312 pages", "Éditions"] {
             assert!(drawn.contains(fact), "{fact} is missing: {drawn}");
         }
-        // A six inch panel has room for three facts, and the two that a borrow
-        // cannot be made without are the two it keeps.
-        assert_eq!(short.detail_fact_rows(2), 3);
-        assert_eq!(short.detail_fact_rows(1), 5);
+        // A six inch panel, once the strip carrying the clock is counted, has
+        // room for two facts against a book both libraries carry -- and those
+        // two are the ones a borrow cannot be made without. A book only one of
+        // them carries gets the second library's row back and spends it on
+        // facts.
+        assert_eq!(short.detail_fact_rows(2), 2);
+        assert_eq!(short.detail_fact_rows(1), 4);
         let drawn = format!("{:?}", short.detail_screen());
         assert!(drawn.contains("Fixture author"));
         assert!(drawn.contains("Available now at Montréal"));
@@ -4368,7 +4818,7 @@ mod tests {
                     app.description_page = page;
                     let errors = app
                         .screen()
-                        .diagnostics(&metrics, &Chrome::with_back(false))
+                        .diagnostics(&metrics, &device_chrome())
                         .issues
                         .into_iter()
                         .filter(|issue| issue.severity == DiagnosticSeverity::Error)
@@ -4952,10 +5402,11 @@ mod tests {
 
     /// Every screen this app can be looked at, except the one it draws on its
     /// way out and the keyboard, which carries its own Cancel.
-    const VIEWS: [View; 13] = [
+    const VIEWS: [View; 14] = [
         View::Discover,
         View::Categories,
         View::Browse,
+        View::Filters,
         View::Search,
         View::Results,
         View::Detail,
@@ -4967,6 +5418,25 @@ mod tests {
         View::Resolve,
         View::Settings,
     ];
+
+    /// The chrome a real device draws this app with.
+    ///
+    /// `kobod` builds it in `chrome_for`: no Back, because a menu entry presents
+    /// this app directly and it is therefore at home, and a status band on every
+    /// screen, because the band is withheld only from a reading screen and this
+    /// app has none. The band is laid out above everything else and takes 59
+    /// pixels of a Clara's content with it.
+    ///
+    /// Every assertion below used `Chrome::with_back(false)`, which draws no
+    /// band. So the whole matrix measured a screen 59 pixels taller than any
+    /// device has, agreed with the app's own arithmetic -- which was making the
+    /// same mistake -- and passed while the browse page controls were sheared
+    /// off by the nav bar on a real Clara. There is nothing to gain from also
+    /// measuring without the band: a screen that fits the tighter chrome fits
+    /// the looser one, and this app never gets the looser one.
+    fn device_chrome() -> Chrome {
+        Chrome::measuring(false)
+    }
 
     /// The real typeface, installed before anything is measured.
     ///
@@ -5031,11 +5501,30 @@ mod tests {
     ///
     /// A screen drawn empty proves nothing about whether it fits: the page that
     /// breaks a panel is the full one.
+    ///
+    /// The content here is the content off a real device, because content that
+    /// is merely plausible proves nothing either. The heading was
+    /// "Books by Marilou Addison", which sets on one line; the subject that
+    /// broke the browse screen was "Enfant, adolescent et enseignement", which
+    /// sets on two. The catalogue offered two orders in English, which fit one
+    /// row of chips; it offers three in French, which with the PDF filter
+    /// beside them are two rows. Every title carried one author; the list that
+    /// wrapped carried five. None of the three was a rounding error and all
+    /// three were absent from this fixture.
+    #[allow(clippy::too_many_lines, reason = "one screenful of fixture data")]
     fn populated() -> PretNumerique {
         let many = |count: usize| {
             (0..count)
-                .map(|index| {
-                    publication(
+                .map(|index| Publication {
+                    authors: vec![
+                        "Jocelyn Boisvert".to_owned(),
+                        "Julie Champagne".to_owned(),
+                        "Denis Côté".to_owned(),
+                        "Alexandre Côté-Fournier".to_owned(),
+                        "Pierrette Dubé".to_owned(),
+                    ],
+                    goodreads_rating: Some(4.1),
+                    ..publication(
                         &format!("A fixture title long enough to wrap number {index}"),
                         vec![source(), out_of_copies()],
                     )
@@ -5066,28 +5555,32 @@ mod tests {
             ],
             categories: (0..9)
                 .map(|index| Category {
-                    name: format!("Children's, Teenage & Educational {index}"),
+                    name: format!("Enfant, adolescent et enseignement {index}"),
                     key: format!("Y{index}"),
                     libraries: vec!["Montréal".to_owned(), "BAnQ".to_owned()],
                     total: Some(11594),
                 })
                 .collect(),
             browse: BrowseQuery {
-                title: "Books by Marilou Addison".to_owned(),
-                category: None,
-                author: Some("Marilou Addison".to_owned()),
-                sort: Some("issued_on_desc".to_owned()),
+                title: "Enfant, adolescent et enseignement".to_owned(),
+                category: Some("YB".to_owned()),
+                author: None,
+                sort: Some("rating_desc".to_owned()),
                 page: 2,
             },
             browsed: many(9),
             sorts: vec![
                 Sort {
                     key: "created_at_desc".to_owned(),
-                    label: "Recent acquisitions".to_owned(),
+                    label: "Acquisitions récentes".to_owned(),
                 },
                 Sort {
                     key: "issued_on_desc".to_owned(),
-                    label: "Recent releases".to_owned(),
+                    label: "Parutions récentes".to_owned(),
+                },
+                Sort {
+                    key: "rating_desc".to_owned(),
+                    label: "Highest rated".to_owned(),
                 },
             ],
             browse_paging: Paging {
@@ -5139,7 +5632,7 @@ mod tests {
                     ..populated()
                 };
                 let screen = app.screen();
-                let layout = screen.layout_with(&metrics, &Chrome::with_back(false));
+                let layout = screen.layout_with(&metrics, &device_chrome());
                 let slot = layout.nodes.iter().find(|node| {
                     matches!(
                         node.kind,
@@ -5160,7 +5653,7 @@ mod tests {
                 // which is how two words become unreadable rather than absent.
                 assert!(
                     !screen
-                        .diagnostics(&metrics, &Chrome::with_back(false))
+                        .diagnostics(&metrics, &device_chrome())
                         .issues
                         .iter()
                         .any(|issue| issue.kind == LayoutIssueKind::TextOverflow
@@ -5189,7 +5682,7 @@ mod tests {
                 };
                 let errors = app
                     .screen()
-                    .diagnostics(&metrics, &Chrome::with_back(false))
+                    .diagnostics(&metrics, &device_chrome())
                     .issues
                     .into_iter()
                     .filter(|issue| issue.severity == DiagnosticSeverity::Error)
@@ -5200,6 +5693,164 @@ mod tests {
                     "{name} refused {view:?}: {}",
                     errors.join("; ")
                 );
+            }
+        }
+    }
+
+    /// What a page of each list actually holds on the panel this app ships to.
+    ///
+    /// Written down so that a change to any of the numbers above has to be
+    /// argued for rather than noticed later on a device. A browse page held
+    /// four books and could not be turned; it holds six and can.
+    #[test]
+    fn a_page_of_each_list_holds_what_the_panel_has_room_for() {
+        typeset();
+        let app = PretNumerique {
+            metrics: CLARA_BW_METRICS,
+            ..populated()
+        };
+        assert_eq!(app.content_height(), 1131, "a Clara 2E, less the clock");
+        assert_eq!(app.browse_rows_per_page(), 6);
+        assert_eq!(app.related_rows_per_page(), 6);
+        assert_eq!(app.results_rows_per_page(), 5);
+        assert_eq!(app.page_rows(), 5);
+        assert_eq!(app.holds_rows_per_page(), 5);
+    }
+
+    /// Both controls that turn a page, whole and inside the content area, on
+    /// every screen that pages and every panel.
+    ///
+    /// This is the assertion that was missing, and the reason nothing caught a
+    /// browse screen whose buttons were 40 per cent visible on a real Clara.
+    /// The two matrix tests above would have caught them being *dropped* --
+    /// `ContentOverflow` is an error and they check for errors -- but the
+    /// renderer had drawn them, three fifths of the way under the navigation
+    /// bar, and `Clipped` did not fire either because the whole-matrix chrome
+    /// carried no status band and so the buttons really did fit the screen the
+    /// tests were measuring. Both halves had to be wrong at once, which is why
+    /// this test checks the geometry of these two controls by name rather than
+    /// trusting an absence of complaints.
+    ///
+    /// E Ink does not scroll. A list whose page cannot be turned is a list
+    /// whose later pages do not exist.
+    #[test]
+    fn the_page_controls_are_whole_on_every_paging_screen_and_panel() {
+        typeset();
+        let paging = [
+            View::Discover,
+            View::Categories,
+            View::Browse,
+            View::Filters,
+            View::Results,
+            View::Description,
+            View::Related,
+            View::Library,
+            View::Holds,
+        ];
+        for (name, metrics) in CONTENT_PANELS {
+            for view in paging {
+                let app = PretNumerique {
+                    view,
+                    metrics,
+                    ..populated()
+                };
+                let screen = app.screen();
+                let layout = screen.layout_with(&metrics, &device_chrome());
+                for (action, label) in [(PREVIOUS_PAGE, "Previous page"), (NEXT_PAGE, "Next page")]
+                {
+                    let wanted = action_id(action);
+                    let node = layout
+                        .nodes
+                        .iter()
+                        .find(|node| {
+                            matches!(node.kind, LayoutKind::Button(drawn, ..) if drawn == wanted)
+                        })
+                        .unwrap_or_else(|| panic!("{name}: no {label} on {view:?}"));
+                    let bottom = layout.content.y + layout.content.height;
+                    assert!(
+                        node.rect.y >= layout.content.y && node.rect.y + node.rect.height <= bottom,
+                        "{name}: {label} on {view:?} is drawn from {} to {}, \
+                         outside the content area {} to {bottom}",
+                        node.rect.y,
+                        node.rect.y + node.rect.height,
+                        layout.content.y,
+                    );
+                    assert!(
+                        node.rect.height >= metrics.touch_target_minimum(),
+                        "{name}: {label} on {view:?} is {} tall",
+                        node.rect.height
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every filter the screen offers can be reached on some page of it.
+    ///
+    /// The chips this replaced were lost two ways at once: a reply carrying
+    /// fewer facets took the PDF toggle with it, and a wrapped run of them
+    /// pushed the page controls off the panel. Neither is possible now, but a
+    /// fifth group would page, and a group on a page nobody can turn to is the
+    /// same fault wearing different clothes.
+    #[test]
+    fn every_filter_is_reachable_on_some_page_of_the_filters_screen() {
+        typeset();
+        for (name, metrics) in CONTENT_PANELS {
+            for sorts in [Vec::new(), populated().sorts] {
+                let app = PretNumerique {
+                    view: View::Filters,
+                    metrics,
+                    sorts,
+                    ..populated()
+                };
+                let groups = app.filter_groups();
+                let per_page = app.filter_groups_per_page(&groups);
+                let pages = groups.len().div_ceil(per_page.max(1));
+                let mut seen = 0;
+                for page in 0..pages {
+                    let app = PretNumerique {
+                        filters_page: page,
+                        ..PretNumerique {
+                            view: View::Filters,
+                            metrics,
+                            sorts: app.sorts.clone(),
+                            ..populated()
+                        }
+                    };
+                    let drawn = format!("{:?}", app.filters_screen());
+                    for group in super::slice_of(&groups, page, per_page) {
+                        seen += 1;
+                        assert!(
+                            drawn.contains(group.title),
+                            "{name}: {} is not on page {page}",
+                            group.title
+                        );
+                        for (_, label, _) in &group.chips {
+                            let label: &str = label;
+                            assert!(
+                                drawn.contains(label),
+                                "{name}: {label} is not on page {page}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(seen, groups.len(), "{name}: a group has no page");
+                // The one control that is never the catalogue's is always here.
+                let anywhere = (0..pages).any(|page| {
+                    format!(
+                        "{:?}",
+                        PretNumerique {
+                            view: View::Filters,
+                            metrics,
+                            filters_page: page,
+                            sorts: app.sorts.clone(),
+                            ..populated()
+                        }
+                        .filters_screen()
+                    )
+                    .contains("Include PDF")
+                });
+                assert!(anywhere, "{name}: the PDF filter is gone");
             }
         }
     }
@@ -5236,7 +5887,7 @@ mod tests {
                 ] {
                     let errors = app
                         .screen()
-                        .diagnostics(&metrics, &Chrome::with_back(false))
+                        .diagnostics(&metrics, &device_chrome())
                         .issues
                         .into_iter()
                         .filter(|issue| issue.severity == DiagnosticSeverity::Error)
@@ -5335,7 +5986,7 @@ mod tests {
                 ),
             ] {
                 let errors = screen
-                    .diagnostics(&metrics, &Chrome::with_back(false))
+                    .diagnostics(&metrics, &device_chrome())
                     .issues
                     .into_iter()
                     .filter(|issue| issue.severity == DiagnosticSeverity::Error)
@@ -5379,7 +6030,7 @@ mod tests {
                 };
                 let errors = app
                     .screen()
-                    .diagnostics(&metrics, &Chrome::with_back(false))
+                    .diagnostics(&metrics, &device_chrome())
                     .issues
                     .into_iter()
                     .filter(|issue| issue.severity == DiagnosticSeverity::Error)
@@ -5442,7 +6093,7 @@ mod tests {
         for (name, metrics) in CONTENT_PANELS {
             let errors = app
                 .library_screen()
-                .diagnostics(&metrics, &Chrome::with_back(false))
+                .diagnostics(&metrics, &device_chrome())
                 .issues
                 .into_iter()
                 .filter(|issue| issue.severity == DiagnosticSeverity::Error)
@@ -5508,9 +6159,91 @@ mod tests {
         let drawn = format!("{:?}", app.discover_screen());
         assert!(drawn.contains("Recent releases"));
         assert!(drawn.contains("Les triplettes"));
-        assert!(drawn.contains("Available now at BAnQ"));
+        // A row says whether it can be had, and no more: which library is the
+        // book screen's business, because that is where a library is chosen.
+        assert!(drawn.contains("A. Michaud · Available"));
+        assert!(!drawn.contains("Available now at BAnQ"));
         assert!(drawn.contains("See the whole list"));
         assert!(drawn.contains("3,204 books in this list"));
+    }
+
+    /// A list row has one line under the title, and these are the names that
+    /// have to fit on it. Every one is a real form from these two catalogues.
+    #[test]
+    fn a_list_row_names_the_first_author_and_counts_the_rest() {
+        for (whole, short) in [
+            ("David Suzuki", "D. Suzuki"),
+            ("Jocelyn Boisvert", "J. Boisvert"),
+            // A hyphenated family name is one name and keeps both halves.
+            ("Alexandre Côté-Fournier", "A. Côté-Fournier"),
+            // A hyphenated given name is two, and both initials are kept:
+            // "M. Larochelle" cannot tell Marie-Ève from Marc-Antoine.
+            ("Marie-Ève Larochelle", "M.-È. Larochelle"),
+            ("Maude Nepveu-Villeneuve", "M. Nepveu-Villeneuve"),
+            // An accented capital is upper case already and stays one
+            // character.
+            ("Émilie Ouellet", "É. Ouellet"),
+            ("Ôta Yôko", "Ô. Yôko"),
+            // A particle belongs to the family name.
+            ("Jean de la Fontaine", "J. de la Fontaine"),
+            ("Antoine de Saint-Exupéry", "A. de Saint-Exupéry"),
+            // Two given names, two initials.
+            ("Jean Paul Sartre", "J. P. Sartre"),
+            // Nothing to shorten around, or nothing gained by shortening.
+            ("Molière", "Molière"),
+            ("Ed Yong", "Ed Yong"),
+            ("Li Bo", "Li Bo"),
+            ("de la Fontaine", "de la Fontaine"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                super::shortened_name(whole),
+                short,
+                "{whole} was shortened wrongly"
+            );
+        }
+        let five = [
+            "Jocelyn Boisvert",
+            "Julie Champagne",
+            "Denis Côté",
+            "Alexandre Côté-Fournier",
+            "Pierrette Dubé",
+        ]
+        .map(str::to_owned);
+        assert_eq!(super::short_author_line(&five), "J. Boisvert +4");
+        assert_eq!(super::short_author_line(&five[..1]), "J. Boisvert");
+        assert_eq!(super::short_author_line(&[]), "Unknown author");
+        // The book's own screen still names every one of them.
+        assert!(super::author_line(&five).contains("Pierrette Dubé"));
+    }
+
+    /// A row says whether a book can be had. Which library has it is the book
+    /// screen's business, because the book screen is where one is chosen.
+    #[test]
+    fn a_list_row_says_only_whether_a_book_can_be_had() {
+        let free = publication("Free", vec![source(), out_of_copies()]);
+        let out = publication("Out", vec![out_of_copies()]);
+        let nowhere = Publication {
+            sources: Vec::new(),
+            ..publication("Nowhere", vec![])
+        };
+        assert_eq!(super::availability_state(&free), "Available");
+        assert_eq!(super::availability_state(&out), "All copies out");
+        assert_eq!(super::availability_state(&nowhere), "Not available");
+        assert!(!publication_summary(&free).contains("Montréal"));
+        // And the book's own screen still names every library and its state.
+        let drawn = format!(
+            "{:?}",
+            PretNumerique {
+                view: View::Detail,
+                detail: Some(free),
+                ..PretNumerique::default()
+            }
+            .detail_screen()
+        );
+        assert!(drawn.contains("Available now at Montréal"));
+        assert!(drawn.contains("Montréal"));
+        assert!(drawn.contains("BAnQ"));
     }
 
     #[test]
@@ -5640,10 +6373,10 @@ mod tests {
     fn a_browse_asks_the_server_whether_there_is_another_page() {
         // A page that is exactly full is not evidence of another one, so the
         // answer has to come from the server rather than from the row count.
-        let full_and_final = browse_body(4, rows(), false);
+        let full_and_final = browse_body(4, browse_rows(), false);
         let (publications, sorts, paging) =
             parse_browse(&full_and_final).expect("a readable book list");
-        assert_eq!(publications.len(), rows());
+        assert_eq!(publications.len(), browse_rows());
         assert_eq!(sorts[0].label, "Recent releases");
         assert_eq!(paging.page, 4);
         assert!(paging.has_previous);
@@ -5668,7 +6401,7 @@ mod tests {
         app.handle_completed(
             &mut context,
             super::RequestKind::Browse,
-            &browse_body(1, rows(), true),
+            &browse_body(1, browse_rows(), true),
         );
         let bounds = app.browse_bounds();
         assert!(bounds.has_next);
@@ -5685,7 +6418,7 @@ mod tests {
     fn a_server_page_is_turned_on_the_panel_before_another_is_asked_for() {
         // Two panels' worth and one row over, so the slice on the panel is
         // turned twice before the server is asked for anything.
-        let held = rows() * 2 + 1;
+        let held = browse_rows() * 2 + 1;
         let mut app = PretNumerique {
             view: View::Browse,
             ..PretNumerique::default()
@@ -5720,7 +6453,7 @@ mod tests {
         app.handle_completed(
             &mut context,
             super::RequestKind::Browse,
-            &browse_body(2, rows(), false),
+            &browse_body(2, browse_rows(), false),
         );
         app.turn_page(&mut context, false);
         assert!(app.browse_from_end);
@@ -5760,7 +6493,13 @@ mod tests {
             ..PretNumerique::default()
         });
         app.start();
-        let drawn = format!("{:?}", app.app().browse_screen());
+        // The orders are on their own screen, reached from the list's bar.
+        let list = format!("{:?}", app.app().browse_screen());
+        assert!(list.contains("Filters"));
+        assert!(!list.contains("Recent acquisitions"));
+        app.action(action_id(FILTERS));
+        assert_eq!(app.app().view, View::Filters);
+        let drawn = format!("{:?}", app.app().filters_screen());
         assert!(drawn.contains("Recent acquisitions"));
         assert!(drawn.contains("Recent releases"));
 
@@ -5846,7 +6585,7 @@ mod tests {
         let mut app = PretNumerique {
             view: View::Related,
             detail: Some(publication("Fixture title", vec![source()])),
-            related: (0..rows() + 2)
+            related: (0..related_rows() + 2)
                 .map(|index| publication(&format!("Neighbour {index}"), vec![source()]))
                 .collect(),
             ..PretNumerique::default()
@@ -5854,12 +6593,12 @@ mod tests {
         let drawn = format!("{:?}", app.related_screen());
         assert!(drawn.contains("Like Fixture title"));
         assert!(drawn.contains("Page 1 of 2"));
-        assert!(drawn.contains(&format!("Neighbour {}", rows() - 1)));
-        assert!(!drawn.contains(&format!("Neighbour {}", rows())));
+        assert!(drawn.contains(&format!("Neighbour {}", related_rows() - 1)));
+        assert!(!drawn.contains(&format!("Neighbour {}", related_rows())));
         let mut context = Context::default();
         app.turn_page(&mut context, true);
         let second = format!("{:?}", app.related_screen());
-        assert!(second.contains(&format!("Neighbour {}", rows() + 1)));
+        assert!(second.contains(&format!("Neighbour {}", related_rows() + 1)));
         assert_eq!(second.matches("state: Disabled").count(), 1);
     }
 
@@ -5965,7 +6704,7 @@ mod tests {
         assert!(books[2].pdf_only);
         assert_eq!(
             publication_summary(&books[0]),
-            "Lise Tremblay · Available now at Montréal · PDF"
+            "L. Tremblay · Available · PDF"
         );
         assert!(!publication_summary(&books[1]).contains("PDF"));
 
@@ -5987,6 +6726,9 @@ mod tests {
         .contains("PDF"));
     }
 
+    /// The PDF filter is this app's own rather than the catalogue's, so it is
+    /// on the filters screen whatever the catalogue sent, and reachable from a
+    /// list that was offered no orders at all.
     #[test]
     fn asking_for_pdf_books_is_one_chip_and_starts_off() {
         // A search sets it up before it is run, so the chip is on that screen.
@@ -6023,25 +6765,29 @@ mod tests {
                 page: 4,
             },
             browsed: vec![publication("Somewhere in the middle", vec![source()])],
-            sorts: vec![
-                Sort {
-                    key: "created_at_desc".to_owned(),
-                    label: "Recent acquisitions".to_owned(),
-                },
-                Sort {
-                    key: "issued_on_desc".to_owned(),
-                    label: "Recent releases".to_owned(),
-                },
-            ],
+            // A list the catalogue offered no orders for. The filter is still
+            // there: it never depended on the catalogue and now cannot.
+            sorts: Vec::new(),
             browse_number: 9,
             ..PretNumerique::default()
         });
         browse.start();
-        assert!(format!("{:?}", browse.app().browse_screen()).contains("Show PDF"));
+        browse.action(action_id(FILTERS));
+        let drawn = format!("{:?}", browse.app().filters_screen());
+        assert!(drawn.contains("Include PDF"), "{drawn}");
+        assert!(
+            drawn.contains("This list comes in one order only."),
+            "{drawn}"
+        );
         let url = fetched(browse.action(action_id(SHOW_PDF))).expect("the list is read again");
         assert!(url.contains("include_pdf=1"), "{url}");
         assert!(url.contains("page=1"), "{url}");
         assert_eq!(browse.app().browse_number, 1);
+        // And the list says what was applied without being opened again.
+        assert!(
+            format!("{:?}", browse.app().browse_screen()).contains("PDF included"),
+            "the list must report its own filters"
+        );
     }
 
     #[test]

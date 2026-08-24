@@ -2,18 +2,22 @@
 clean
 tap Categories
 wait-for Browse by subject
-expect Children's, Teenage & Educational
+expect Enfant, adolescent et enseignement
 expect 11,594 books · Montréal and BAnQ
 expect Page 1 of 2
 clean
 tap Next page
-wait-for Mathematics & Science
+wait-for Mathématiques et sciences
 clean
 tap Previous page
-wait-for Fiction & Related items
-tap Fiction & Related items
-wait-for Recent acquisitions
-expect Fiction & Related items
+wait-for Fiction et thèmes associés
+tap Fiction et thèmes associés
+# The list's name is the bar's title now, on one line, and its filters are a
+# screen of their own reached from that bar.
+wait-for Filters
+expect Fiction et thèmes associés
+expect Previous page
+expect Next page
 clean
 tap Back
 wait-for Browse by subject

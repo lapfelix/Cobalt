@@ -1,15 +1,25 @@
 # A book neither library has as anything but a PDF. It is not in a list until it
-# is asked for, and when it is, the row and the book both say PDF.
+# is asked for, and when it is, the row and the book both say PDF. The filter is
+# on the filters screen, where it is reachable whatever the catalogue sent.
 clean
 tap Categories
 wait-for Browse by subject
-tap Children's, Teenage & Educational
-wait-for Recent acquisitions
-expect Show PDF
+tap Enfant, adolescent et enseignement
+wait-for Filters
+expect Enfant, adolescent et enseignement
 expect-missing Le guide illustré du potager
 clean
-tap Show PDF
+tap Filters
+wait-for Format
+expect Order
+expect Format
+expect Include PDF
+clean
+tap Include PDF
+tap Done
 wait-for Le guide illustré du potager
+# The list reports what was applied without being opened again.
+expect PDF included
 expect PDF
 clean
 tap Le guide illustré du potager
@@ -18,8 +28,11 @@ expect PDF only, hard to read here
 expect Available now at Montréal
 clean
 tap Back
-wait-for Recent acquisitions
-tap Show PDF
-wait-for Recent releases
+wait-for PDF included
+tap Filters
+wait-for Include PDF
+tap Include PDF
+tap Done
+wait-for Les triplettes - Tome 1
 expect-missing Le guide illustré du potager
 clean
