@@ -531,6 +531,10 @@ pub fn present(application: &Path, limits: Limits) -> Result<String, String> {
     reader
         .save(&state)
         .map_err(|error| format!("save reader description: {error}"))?;
+    // Capture the live network owners before Nickel is stopped. On devices
+    // whose station is `mlan0`, assuming `wlan0` makes the hand-back look
+    // successful while the lease has actually gone away.
+    let connection = kobo_hal::network::Connection::capture();
     let watchdog = Arc::new(
         Watchdog::arm(&state, WATCHDOG_CHECK).map_err(|error| format!("arm watchdog: {error}"))?,
     );
@@ -667,21 +671,21 @@ pub fn present(application: &Path, limits: Limits) -> Result<String, String> {
     trace("panel and touch released, restarting the reader");
     println!("panel released, restarting the reader");
     let restarted = reader.start(START_GRACE);
-    // The connection is never put back, and there is no longer a way to ask
-    // for it. Restoring it meant starting a supplicant and a DHCP client on
-    // `wlan0` while the reader we had just restarted drives that same radio
-    // itself, from inside libnickel, with no way to be told what we did. Two
-    // owners of one radio is the mistake the display is careful to avoid
-    // twelve lines above, and it had the same shape here.
-    //
-    // It existed as a convenience for working on a device over Wi-Fi, where
-    // losing the link costs a reboot. It is gone because that convenience was
-    // the first link in the chain that erased a device: the reader came up
-    // owning a radio it had not configured, never reached its first watchdog
-    // ping, and the watchdog was armed against it anyway. The second link is
-    // fixed in `resume_once_fed`, which now arms nothing without evidence, but
-    // a developer's reboot was never worth being one fault away from a
-    // stranger's library.
+    // Nickel normally brings the connection back itself. If it does not,
+    // restore the exact supplicant and DHCP commands captured above, on the
+    // interface the device was actually using. The network helper waits for
+    // Nickel's delayed hand-off before deciding it needs to intervene, so a
+    // healthy restart does not create competing radio owners.
+    let network = restarted
+        .as_ref()
+        .ok()
+        .map(|_| connection.restore(Duration::from_secs(30)));
+    if let Some(result) = &network {
+        match result {
+            Ok(state) => trace(&format!("network hand-back: {state:?}")),
+            Err(error) => trace(&format!("network hand-back failed: {error}")),
+        }
+    }
     trace("reader restart returned, waiting for it to feed the freeze watchdog");
     println!("waiting for the reader to feed the freeze watchdog");
     // Resumed only once the reader is feeding it again. Resuming the moment
@@ -708,8 +712,17 @@ pub fn present(application: &Path, limits: Limits) -> Result<String, String> {
             "THE READER DID NOT COME BACK ({error}). Power cycle the device; it always boots the stock reader"
         ),
     };
-    let reader_state =
-        format!("{reader_state}; the Wi-Fi connection is the reader's own again, so reconnect from its network screen if it does not return by itself");
+    let reader_state = match network {
+        Some(Ok(kobo_hal::network::Restored::Unaffected)) => {
+            format!("{reader_state}; Wi-Fi stayed up")
+        }
+        Some(Ok(kobo_hal::network::Restored::Restarted)) => {
+            format!("{reader_state}; Wi-Fi was restored on the device's station interface")
+        }
+        Some(Ok(kobo_hal::network::Restored::StillDown)) | Some(Err(_)) | None => format!(
+            "{reader_state}; Wi-Fi did not return automatically, so reconnect from the reader's network screen"
+        ),
+    };
     // Worth saying out loud rather than swallowing. The device is running
     // without its hardware watchdog until it is rebooted, which is a real loss
     // even though the kernel arms it again on the next boot.

@@ -24,14 +24,18 @@
 use kobo_json::{ObjectBuilder, Value};
 use kobo_sdk::keyboard::{TextEntry, Typing};
 use kobo_sdk::{
-    action_id, BannerLevel, Context, Credential, Failure, Glyph, Header, KoboApp, Screen,
-    ScreenBuilder, Space, StoreResult, Task, TaskError, TaskId, TaskOutcome,
+    action_id, BannerLevel, Context, Credential, Failure, Glyph, Header, KoboApp, PictureHandle,
+    Screen, ScreenBuilder, Space, StoreResult, Task, TaskError, TaskId, TaskOutcome, TilePicture,
 };
 use std::process::ExitCode;
 
 const API: &str = "https://home.lapal.me:3300/pret/v1";
 const API_SECRET: &str = "pret-numerique-api";
 const STORE_STATE: &str = "ui-state";
+const COVER_PICTURE_HANDLE: PictureHandle = PictureHandle(41);
+const COVER_WIDTH: u32 = 260;
+const COVER_HEIGHT: u32 = 419;
+const COVER_MAX_BYTES: u32 = 1_300_000;
 const MAX_RESULTS: usize = 40;
 const MAX_QUERY_CHARS: usize = 80;
 const MAX_DETAIL_DESCRIPTION_CHARS: usize = 88;
@@ -105,11 +109,16 @@ const LIBRARY: &str = "library-tab";
 const SETTINGS: &str = "settings-tab";
 const SEARCH: &str = "open-search";
 const CATEGORIES: &str = "open-categories";
+const BOOKSTORE_CATEGORIES: &str = "open-bookstore-categories";
 const HOLDS: &str = "open-holds";
 const SHOW_PDF: &str = "show-pdf";
 const FILTERS: &str = "open-filters";
 const RELATED: &str = "open-related";
 const DESCRIPTION: &str = "open-description";
+const BOOKSTORE_CATEGORY: &str = "bookstore-category";
+const FAVORITE_CATEGORY: &str = "favorite-category";
+const FAVORITE_BROWSE: &str = "favorite-browse";
+const PRESET: &str = "browse-preset";
 const PREVIOUS_PAGE: &str = "previous-page";
 const NEXT_PAGE: &str = "next-page";
 const EDIT_QUERY: &str = "edit-query";
@@ -133,6 +142,8 @@ enum View {
     #[default]
     Discover,
     Categories,
+    /// The cross-reference of the two libraries against leslibraires.ca.
+    BookstoreCategories,
     /// One list of books: a discovery group, a category, or an author.
     Browse,
     /// How a list is ordered and what it leaves out, with a screen of its own.
@@ -286,6 +297,15 @@ struct Category {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct BookstoreCategory {
+    id: String,
+    name: String,
+    path: String,
+    held: i64,
+    bookstore_total: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Sort {
     key: String,
     label: String,
@@ -309,9 +329,12 @@ struct FilterGroup {
 struct BrowseQuery {
     title: String,
     category: Option<String>,
+    audience: Option<String>,
     author: Option<String>,
     sort: Option<String>,
     page: u32,
+    available_only: bool,
+    bookstore: bool,
 }
 
 /// Where a paged list is, and which way it can still go.
@@ -432,6 +455,7 @@ enum RequestKind {
     Search,
     Discovery,
     CategoryList,
+    BookstoreCategories,
     Browse,
     Related,
     Shelf,
@@ -439,6 +463,8 @@ enum RequestKind {
     Jobs,
     Job,
     Health,
+    Cover,
+    BookstoreCategory,
     Borrow,
     Hold,
     Return,
@@ -461,6 +487,10 @@ struct PretNumerique {
     groups_page: usize,
     categories: Vec<Category>,
     categories_page: usize,
+    bookstore_categories: Vec<BookstoreCategory>,
+    bookstore_categories_page: usize,
+    /// IDs only: names and paths come from the daily proxy snapshot.
+    favorites: Vec<String>,
     browse: BrowseQuery,
     browsed: Vec<Publication>,
     sorts: Vec<Sort>,
@@ -487,6 +517,10 @@ struct PretNumerique {
     related: Vec<Publication>,
     related_page: usize,
     detail: Option<Publication>,
+    cover: Option<TilePicture>,
+    bookstore_category: Option<String>,
+    bookstore_category_state: Option<String>,
+    bookstore_category_handle: Option<String>,
     /// Which page of the open book's blurb is showing.
     ///
     /// Not kept on the trail. A `Place` carries the book, so coming back to a
@@ -533,6 +567,9 @@ impl Default for PretNumerique {
             groups_page: 0,
             categories: Vec::new(),
             categories_page: 0,
+            bookstore_categories: Vec::new(),
+            bookstore_categories_page: 0,
+            favorites: Vec::new(),
             browse: BrowseQuery::default(),
             browsed: Vec::new(),
             sorts: Vec::new(),
@@ -544,6 +581,10 @@ impl Default for PretNumerique {
             related: Vec::new(),
             related_page: 0,
             detail: None,
+            cover: None,
+            bookstore_category: None,
+            bookstore_category_state: None,
+            bookstore_category_handle: None,
             description_page: 0,
             selected_source: 0,
             books: Vec::new(),
@@ -574,6 +615,8 @@ impl PretNumerique {
     fn state_bytes(&self) -> Vec<u8> {
         let mut bytes = self.query.replace(['\n', '\r'], " ").into_bytes();
         bytes.push(b'\n');
+        bytes.extend_from_slice(self.favorites.join(",").as_bytes());
+        bytes.push(b'\n');
         bytes
     }
 
@@ -589,6 +632,20 @@ impl PretNumerique {
             .next()
             .unwrap_or_default()
             .clone_into(&mut self.query);
+        self.favorites = text
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .split(',')
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 8
+                    && id
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric())
+            })
+            .map(str::to_owned)
+            .collect();
     }
 
     fn save_state(&mut self, context: &mut Context) {
@@ -603,6 +660,7 @@ impl PretNumerique {
         match self.view {
             View::Discover => self.discover_screen(),
             View::Categories => self.categories_screen(),
+            View::BookstoreCategories => self.bookstore_categories_screen(),
             View::Browse => self.browse_screen(),
             View::Filters => self.filters_screen(),
             View::Search => self.search_screen(),
@@ -804,6 +862,25 @@ impl PretNumerique {
             0,
         );
         screen = self.note_block(screen, BannerLevel::Attention);
+        let favorites = self.favorite_categories();
+        if !favorites.is_empty() {
+            screen = screen.section_rows(
+                "Favorite categories",
+                None,
+                favorites
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(index, category)| {
+                        (
+                            format!("{FAVORITE_BROWSE}.{index}"),
+                            self.row_title(&category.path),
+                            bookstore_category_summary(category),
+                            Glyph::Bookmark,
+                        )
+                    }),
+            );
+        }
         if self.groups.is_empty() && self.awaiting(RequestKind::Discovery) {
             return screen.skeleton(self.skeleton_lines()).build();
         }
@@ -862,6 +939,7 @@ impl PretNumerique {
         let mut screen = Self::nav(
             ScreenBuilder::new("categories")
                 .top_bar("Categories")
+                .top_bar_action(BOOKSTORE_CATEGORIES, "Les Libraires")
                 .top_bar_action(BACK, "Back"),
             0,
         )
@@ -889,6 +967,67 @@ impl PretNumerique {
                     }),
             );
             screen = Self::page_controls(screen, paging);
+        }
+        screen.build()
+    }
+
+    /// Categories from leslibraires.ca whose books are present in at least one
+    /// of the two libraries. Each category gets a browse row and a separate
+    /// favorite row so a favorite never steals the action that opens the list.
+    fn bookstore_categories_screen(&self) -> Screen {
+        let mut screen = Self::nav(
+            ScreenBuilder::new("bookstore-categories")
+                .top_bar("Les Libraires")
+                .top_bar_action(BACK, "Back"),
+            0,
+        )
+        .heading("Browse by bookstore category")
+        .text("Only books cross-referenced in Montréal or BAnQ are shown.");
+        screen = self.note_block(screen, BannerLevel::Attention);
+        if self.bookstore_categories.is_empty() && self.awaiting(RequestKind::BookstoreCategories) {
+            return screen.skeleton(self.skeleton_lines()).build();
+        }
+        if self.bookstore_categories.is_empty() {
+            screen = screen.empty_state("No cross-referenced categories yet.");
+        } else {
+            let per_page = self.bookstore_categories_rows_per_page();
+            let page = self
+                .bookstore_categories_page
+                .min(self.bookstore_categories.len().saturating_sub(1) / per_page);
+            let rows = slice_of(&self.bookstore_categories, page, per_page)
+                .iter()
+                .enumerate()
+                .flat_map(|(offset, category)| {
+                    let index = page * per_page + offset;
+                    let favorite = self.is_favorite(&category.id);
+                    [
+                        (
+                            format!("{BOOKSTORE_CATEGORY}.{index}"),
+                            self.row_title(&category.path),
+                            bookstore_category_summary(category),
+                            Glyph::Book,
+                        ),
+                        (
+                            format!("{FAVORITE_CATEGORY}.{index}"),
+                            if favorite {
+                                "Remove from Discover".to_owned()
+                            } else {
+                                "Show on Discover".to_owned()
+                            },
+                            if favorite {
+                                "Favorite category".to_owned()
+                            } else {
+                                "Quick access on Discover".to_owned()
+                            },
+                            Glyph::Bookmark,
+                        ),
+                    ]
+                });
+            screen = screen.rows(rows);
+            screen = Self::page_controls(
+                screen,
+                Paging::sized(page, self.bookstore_categories.len(), per_page),
+            );
         }
         screen.build()
     }
@@ -1054,16 +1193,24 @@ impl PretNumerique {
             ScreenBuilder::new("detail")
                 .top_bar("Book details")
                 .top_bar_action(BACK, "Back")
-                // In the bar rather than a row of its own: a book's screen has
-                // room for the libraries, the author and one paragraph, and
-                // this is the cheapest of the four places to put a way on.
-                .compose(|screen| match result.related_handle() {
-                    Some(_) => screen.top_bar_action(RELATED, "Similar"),
-                    None => screen,
+                // Keep the two secondary book actions in the bar. A cover can
+                // consume the optional rows on a Clara, but the full blurb
+                // must remain one tap away even then.
+                .compose(|mut screen| {
+                    if self.cover.is_some() && result.description.is_some() {
+                        screen = screen.top_bar_action(DESCRIPTION, "Description");
+                    }
+                    if result.related_handle().is_some() {
+                        screen = screen.top_bar_action(RELATED, "Similar");
+                    }
+                    screen
                 }),
             0,
         )
         .heading(result.title.clone());
+        if let Some(cover) = self.cover {
+            screen = screen.unframed_picture(cover, 24);
+        }
         // The note goes above everything the screen might have to leave out.
         // A borrow that was never sent reports itself here, and the panel drops
         // whatever runs past the bottom without saying so.
@@ -1170,17 +1317,18 @@ impl PretNumerique {
         [
             ("Author", Some(author_line(&book.authors))),
             ("Copies", Some(availability_summary(book))),
+            ("Length", length_label(book)),
+            (
+                "Published",
+                book.published.as_deref().and_then(published_label),
+            ),
+            ("Les Libraires", self.bookstore_category.clone()),
             (
                 "Format",
                 book.pdf_only
                     .then(|| "PDF only, hard to read here".to_owned()),
             ),
             ("Goodreads", rating),
-            ("Length", length_label(book)),
-            (
-                "Published",
-                book.published.as_deref().and_then(published_label),
-            ),
             ("Publisher", book.publisher.clone()),
         ]
         .into_iter()
@@ -1625,6 +1773,8 @@ impl PretNumerique {
                 .is_some_and(|watch| watch.view == View::Detail);
         if busy {
             0
+        } else if self.cover.is_some() {
+            usize::from(self.content_height() >= 1600)
         } else if self.content_height() >= TALL_PANEL {
             2
         } else {
@@ -1651,9 +1801,14 @@ impl PretNumerique {
     fn detail_fact_rows(&self, libraries: usize) -> usize {
         let extras = i32::try_from(self.detail_extras()).unwrap_or(0);
         let blurb = if extras >= 2 { BLURB_EXTRA_LINE } else { 0 };
+        let cover = self
+            .cover
+            .map(|_| self.metrics.tenth_mm(240) + self.gap())
+            .unwrap_or(0);
         let libraries = i32::try_from(libraries).unwrap_or(2).max(1);
         let room = self.content_height()
             - DETAIL_FURNITURE
+            - cover
             - libraries * LIBRARY_ROW_COST
             - extras * DETAIL_EXTRA_COST
             - blurb;
@@ -1710,6 +1865,40 @@ impl PretNumerique {
             .filter(|entry| entry.is_hold() && self.filter.matches(&entry.catalog))
             .cloned()
             .collect()
+    }
+
+    fn is_favorite(&self, id: &str) -> bool {
+        self.favorites.iter().any(|favorite| favorite == id)
+    }
+
+    fn favorite_categories(&self) -> Vec<BookstoreCategory> {
+        self.favorites
+            .iter()
+            .filter_map(|id| {
+                self.bookstore_categories
+                    .iter()
+                    .find(|category| &category.id == id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn bookstore_categories_rows_per_page(&self) -> usize {
+        let spent = self.heading_cost() + 2 * Self::text_line_cost() + self.gap();
+        (self.rows_that_fit(spent, MAX_PAGE_ROWS) / 2).max(1)
+    }
+
+    fn toggle_favorite(&mut self, context: &mut Context, index: usize) {
+        let Some(category) = self.bookstore_categories.get(index) else {
+            return;
+        };
+        if let Some(position) = self.favorites.iter().position(|id| id == &category.id) {
+            self.favorites.remove(position);
+        } else {
+            self.favorites.push(category.id.clone());
+        }
+        self.save_state(context);
+        self.show(context);
     }
 
     /// What the library says about this loan, matched to what the home server
@@ -1855,7 +2044,65 @@ impl PretNumerique {
                 // whether or not the catalogue offered any orders at all.
                 chips: vec![(SHOW_PDF.to_owned(), "Include PDF".to_owned(), self.show_pdf)],
             },
+            FilterGroup {
+                title: "Quick lists",
+                empty: "No curated lists are configured.",
+                chips: Self::browse_presets()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (_, label, _, _, _, _))| {
+                        (
+                            format!("{PRESET}.{index}"),
+                            (*label).to_owned(),
+                            self.preset_selected(index),
+                        )
+                    })
+                    .collect(),
+            },
         ]
+    }
+
+    /// Curated combinations of the same query facets the catalog exposes.
+    /// They are deliberately named rather than making a reader remember URL
+    /// syntax, and the proxy still applies the final filtering upstream.
+    fn browse_presets() -> [(
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+        Option<&'static str>,
+    ); 2] {
+        [
+            (
+                "12-plus-available",
+                "12+ · Available fiction",
+                Some("F"),
+                Some("12_and_over"),
+                true,
+                Some("issued_on_desc"),
+            ),
+            (
+                "young-fiction",
+                "Young adult fiction",
+                Some("YFB"),
+                None,
+                false,
+                None,
+            ),
+        ]
+    }
+
+    fn preset_selected(&self, index: usize) -> bool {
+        let presets = Self::browse_presets();
+        let Some((_, _, category, audience, available, sort)) = presets.get(index) else {
+            return false;
+        };
+        !self.browse.bookstore
+            && self.browse.category.as_deref() == *category
+            && self.browse.audience.as_deref() == *audience
+            && self.browse.available_only == *available
+            && self.browse.sort.as_deref() == *sort
     }
 
     /// How many filter groups fit on one page of the filters screen.
@@ -1903,6 +2150,15 @@ impl PretNumerique {
         }
         if self.show_pdf {
             parts.push("PDF included".to_owned());
+        }
+        if self.browse.available_only {
+            parts.push("Available now".to_owned());
+        }
+        if let Some(audience) = self.browse.audience.as_deref() {
+            parts.push(match audience {
+                "12_and_over" => "12+".to_owned(),
+                other => other.replace('_', " "),
+            });
         }
         if parts.is_empty() {
             return None;
@@ -2136,11 +2392,32 @@ impl PretNumerique {
         );
     }
 
+    fn start_bookstore_categories(&mut self, context: &mut Context) {
+        self.start_read(
+            context,
+            RequestKind::BookstoreCategories,
+            format!("{API}/bookstore/categories"),
+            128 * 1024,
+        );
+    }
+
     fn start_browse(&mut self, context: &mut Context) {
-        let mut url = format!("{API}/browse?page={}", self.browse.page.max(1));
+        let endpoint = if self.browse.bookstore {
+            "/bookstore/browse"
+        } else {
+            "/browse"
+        };
+        let mut url = format!("{API}{endpoint}?page={}", self.browse.page.max(1));
         if let Some(category) = &self.browse.category {
             url.push_str("&category=");
             url.push_str(&percent_encode(category));
+        }
+        if let Some(audience) = &self.browse.audience {
+            url.push_str("&audience=");
+            url.push_str(&percent_encode(audience));
+        }
+        if self.browse.available_only {
+            url.push_str("&availability=available");
         }
         if let Some(author) = &self.browse.author {
             url.push_str("&author=");
@@ -2441,6 +2718,10 @@ impl PretNumerique {
                 self.start_categories(context);
                 true
             }
+            Some(RequestKind::BookstoreCategories) => {
+                self.start_bookstore_categories(context);
+                true
+            }
             Some(RequestKind::Browse) => {
                 self.start_browse(context);
                 true
@@ -2479,6 +2760,9 @@ impl PretNumerique {
                 Some(groups) => {
                     self.groups = groups;
                     self.groups_page = 0;
+                    if !self.favorites.is_empty() && self.bookstore_categories.is_empty() {
+                        self.queued_request = Some(RequestKind::BookstoreCategories);
+                    }
                 }
                 None => {
                     self.note = Some("The proxy returned an unreadable home page.".to_owned());
@@ -2491,6 +2775,17 @@ impl PretNumerique {
                 }
                 None => {
                     self.note = Some("The proxy returned an unreadable subject list.".to_owned());
+                }
+            },
+            RequestKind::BookstoreCategories => match parse_bookstore_categories(body) {
+                Some(categories) => {
+                    self.bookstore_categories = categories;
+                    self.bookstore_categories_page = 0;
+                }
+                None => {
+                    self.note = Some(
+                        "The proxy returned an unreadable bookstore category list.".to_owned(),
+                    );
                 }
             },
             RequestKind::Browse => match parse_browse(body) {
@@ -2525,6 +2820,21 @@ impl PretNumerique {
                     self.note = Some("The proxy returned an unreadable book list.".to_owned());
                 }
             },
+            RequestKind::Cover => {
+                self.cover = decode_cover(body).and_then(|(width, height, grey)| {
+                    context.put_picture(COVER_PICTURE_HANDLE, width, height, grey)
+                });
+                self.start_bookstore_category(context);
+            }
+            RequestKind::BookstoreCategory => {
+                if let Some((state, path)) = parse_bookstore_category(body) {
+                    self.bookstore_category_state = Some(state);
+                    self.bookstore_category = path;
+                } else {
+                    self.bookstore_category_state = Some("unknown".to_owned());
+                    self.bookstore_category = None;
+                }
+            }
             RequestKind::Shelf => match parse_shelf(body) {
                 Some(entries) => {
                     self.shelf = entries;
@@ -2654,7 +2964,12 @@ impl PretNumerique {
         }
     }
 
-    fn handle_failed(&mut self, kind: RequestKind, error: TaskError) {
+    fn handle_failed(&mut self, context: &mut Context, kind: RequestKind, error: TaskError) {
+        if kind == RequestKind::Cover {
+            self.cover = None;
+            self.start_bookstore_category(context);
+            return;
+        }
         let advice = Failure::of(error).advice;
         if matches!(
             kind,
@@ -2757,12 +3072,21 @@ impl PretNumerique {
         self.view = place.view;
         self.detail = place.detail;
         self.browse = place.browse;
+        if self.view != View::Detail {
+            self.cover = None;
+            self.bookstore_category = None;
+            self.bookstore_category_state = None;
+            self.bookstore_category_handle = None;
+        }
         self.note = None;
         // A screen that only ever exists as an answer to a request has nothing
         // to draw when it is reached again, so it asks again.
         match self.view {
             View::Discover if self.groups.is_empty() => self.start_discovery(context),
             View::Categories if self.categories.is_empty() => self.start_categories(context),
+            View::BookstoreCategories if self.bookstore_categories.is_empty() => {
+                self.start_bookstore_categories(context)
+            }
             View::Browse if self.browsed.is_empty() => self.start_browse(context),
             _ => self.show(context),
         }
@@ -2802,11 +3126,112 @@ impl PretNumerique {
         self.start_browse(context);
     }
 
+    fn apply_preset(&mut self, context: &mut Context, index: usize) {
+        let Some((_, title, category, audience, available_only, sort)) =
+            Self::browse_presets().get(index).copied()
+        else {
+            return;
+        };
+        if self.view == View::Filters
+            && self
+                .trail
+                .last()
+                .is_some_and(|place| place.view == View::Browse)
+        {
+            self.trail.pop();
+        }
+        self.view = View::Browse;
+        self.browse = BrowseQuery {
+            title: title.to_owned(),
+            category: category.map(str::to_owned),
+            audience: audience.map(str::to_owned),
+            author: None,
+            sort: sort.map(str::to_owned),
+            page: 1,
+            available_only,
+            bookstore: false,
+        };
+        self.show_pdf = false;
+        self.browsed.clear();
+        self.sorts.clear();
+        self.browse_paging = Paging::default();
+        self.browse_offset = 0;
+        self.browse_number = 1;
+        self.start_browse(context);
+    }
+
     fn open_detail(&mut self, context: &mut Context, publication: Publication) {
         self.deeper(context, View::Detail);
+        self.cover = None;
+        self.bookstore_category = None;
+        self.bookstore_category_state = None;
+        self.bookstore_category_handle = None;
         self.detail = Some(publication);
         self.selected_source = 0;
+        self.start_cover(context);
         self.show(context);
+    }
+
+    /// Covers are fetched only after a reader opens a book. The proxy has
+    /// already reduced the image to the Kobo's sixteen greys, so this request
+    /// transfers pixels the panel can draw directly rather than making the
+    /// device decode a publisher image on its own watchdog.
+    fn start_cover(&mut self, context: &mut Context) {
+        if !self.clear_for_request(context) {
+            return;
+        }
+        let Some(handle) = self
+            .detail
+            .as_ref()
+            .and_then(Publication::related_handle)
+            .map(percent_encode)
+        else {
+            self.start_bookstore_category(context);
+            return;
+        };
+        let task = Task::Fetch {
+            url: format!(
+                "{API}/publications/{handle}/cover?width={COVER_WIDTH}&height={COVER_HEIGHT}"
+            ),
+            offset: 0,
+            max_bytes: COVER_MAX_BYTES,
+            credential: Some(Self::credential()),
+            headers: vec![Header::new("Accept", "application/octet-stream")],
+        };
+        if let Some(task_id) = context.spawn(task) {
+            self.inflight = Some((task_id, RequestKind::Cover));
+        } else {
+            self.start_bookstore_category(context);
+        }
+    }
+
+    fn start_bookstore_category(&mut self, context: &mut Context) {
+        if !self.clear_for_request(context) {
+            return;
+        }
+        let Some(handle) = self
+            .detail
+            .as_ref()
+            .and_then(Publication::related_handle)
+            .map(percent_encode)
+        else {
+            self.bookstore_category_state = Some("unknown".to_owned());
+            return;
+        };
+        self.bookstore_category_handle = Some(handle.clone());
+        self.bookstore_category_state = Some("unresolved".to_owned());
+        let task = Task::Fetch {
+            url: format!("{API}/publications/{handle}/category"),
+            offset: 0,
+            max_bytes: 16 * 1024,
+            credential: Some(Self::credential()),
+            headers: vec![Header::new("Accept", "application/json")],
+        };
+        if let Some(task_id) = context.spawn_retrying(task) {
+            self.inflight = Some((task_id, RequestKind::BookstoreCategory));
+        } else {
+            self.bookstore_category_state = Some("unknown".to_owned());
+        }
     }
 
     /// Turns a page, or asks the server for the next one.
@@ -2839,6 +3264,14 @@ impl PretNumerique {
                     forward,
                     self.categories.len(),
                     self.page_rows(),
+                );
+            }
+            View::BookstoreCategories => {
+                self.bookstore_categories_page = turned(
+                    self.bookstore_categories_page,
+                    forward,
+                    self.bookstore_categories.len(),
+                    self.bookstore_categories_rows_per_page(),
                 );
             }
             View::Library => {
@@ -2921,10 +3354,17 @@ impl KoboApp for PretNumerique {
         self.start_discovery(context);
     }
 
-    fn on_store(&mut self, _context: &mut Context, result: StoreResult) {
+    fn on_store(&mut self, context: &mut Context, result: StoreResult) {
         if let StoreResult::Loaded { key, value } = result {
             if key == STORE_STATE {
                 self.load_state(value.as_deref());
+                if !self.favorites.is_empty() && self.bookstore_categories.is_empty() {
+                    if self.inflight.is_some() {
+                        self.queued_request = Some(RequestKind::BookstoreCategories);
+                    } else {
+                        self.start_bookstore_categories(context);
+                    }
+                }
             }
         }
     }
@@ -2968,6 +3408,15 @@ impl KoboApp for PretNumerique {
             self.deeper(context, View::Categories);
             if self.categories.is_empty() {
                 self.start_categories(context);
+            } else {
+                self.show(context);
+            }
+            return;
+        }
+        if action == action_id(BOOKSTORE_CATEGORIES) {
+            self.deeper(context, View::BookstoreCategories);
+            if self.bookstore_categories.is_empty() {
+                self.start_bookstore_categories(context);
             } else {
                 self.show(context);
             }
@@ -3056,6 +3505,7 @@ impl KoboApp for PretNumerique {
                 View::Search | View::Results => self.start_search(context),
                 View::Discover => self.start_discovery(context),
                 View::Categories => self.start_categories(context),
+                View::BookstoreCategories => self.start_bookstore_categories(context),
                 View::Browse => self.start_browse(context),
                 View::Related => self.start_related(context),
                 View::Library | View::Holds => {
@@ -3131,9 +3581,12 @@ impl KoboApp for PretNumerique {
                 let query = BrowseQuery {
                     title: group.title.clone(),
                     category: Some(category),
+                    audience: None,
                     author: None,
                     sort: None,
                     page: 1,
+                    available_only: false,
+                    bookstore: false,
                 };
                 self.open_browse(context, query);
             }
@@ -3144,11 +3597,58 @@ impl KoboApp for PretNumerique {
             let query = BrowseQuery {
                 title: category.name.clone(),
                 category: Some(category.key.clone()),
+                audience: None,
                 author: None,
                 sort: None,
                 page: 1,
+                available_only: false,
+                bookstore: false,
             };
             self.open_browse(context, query);
+            return;
+        }
+        if let Some(index) =
+            action_index(action, BOOKSTORE_CATEGORY, self.bookstore_categories.len())
+        {
+            let category = self.bookstore_categories[index].clone();
+            self.open_browse(
+                context,
+                BrowseQuery {
+                    title: category.path,
+                    category: Some(category.id),
+                    audience: None,
+                    author: None,
+                    sort: None,
+                    page: 1,
+                    available_only: false,
+                    bookstore: true,
+                },
+            );
+            return;
+        }
+        if let Some(index) =
+            action_index(action, FAVORITE_CATEGORY, self.bookstore_categories.len())
+        {
+            self.toggle_favorite(context, index);
+            return;
+        }
+        if let Some(index) = action_index(action, FAVORITE_BROWSE, self.favorites.len()) {
+            let favorites = self.favorite_categories();
+            if let Some(category) = favorites.get(index) {
+                self.open_browse(
+                    context,
+                    BrowseQuery {
+                        title: category.path.clone(),
+                        category: Some(category.id.clone()),
+                        audience: None,
+                        author: None,
+                        sort: None,
+                        page: 1,
+                        available_only: false,
+                        bookstore: true,
+                    },
+                );
+            }
             return;
         }
         if let Some(index) = self
@@ -3161,9 +3661,12 @@ impl KoboApp for PretNumerique {
                 let query = BrowseQuery {
                     title: format!("Books by {author}"),
                     category: None,
+                    audience: None,
                     author: Some(author),
                     sort: None,
                     page: 1,
+                    available_only: false,
+                    bookstore: false,
                 };
                 self.open_browse(context, query);
             }
@@ -3179,6 +3682,10 @@ impl KoboApp for PretNumerique {
                 self.browsed.clear();
                 self.start_browse(context);
             }
+            return;
+        }
+        if let Some(index) = action_index(action, PRESET, Self::browse_presets().len()) {
+            self.apply_preset(context, index);
             return;
         }
         if let Some(index) = self
@@ -3230,7 +3737,7 @@ impl KoboApp for PretNumerique {
         self.inflight = None;
         match outcome {
             TaskOutcome::Completed(body) => self.handle_completed(context, kind, &body),
-            TaskOutcome::Failed(error) => self.handle_failed(kind, error),
+            TaskOutcome::Failed(error) => self.handle_failed(context, kind, error),
             TaskOutcome::Cancelled => {
                 self.note = Some("The request was cancelled.".to_owned());
             }
@@ -3471,6 +3978,13 @@ fn category_summary(category: &Category) -> String {
         (None, false) => library_list(&libraries),
         (None, true) => "Both libraries".to_owned(),
     }
+}
+
+fn bookstore_category_summary(category: &BookstoreCategory) -> String {
+    let held = format!("{} in your libraries", count_label(category.held));
+    category.bookstore_total.map_or(held.clone(), |total| {
+        format!("{held} · {} in leslibraires.ca", count_label(total))
+    })
 }
 
 fn group_count(group: &Group) -> String {
@@ -3866,6 +4380,7 @@ fn is_read(kind: RequestKind) -> bool {
         RequestKind::Search
             | RequestKind::Discovery
             | RequestKind::CategoryList
+            | RequestKind::BookstoreCategories
             | RequestKind::Browse
             | RequestKind::Related
             | RequestKind::Shelf
@@ -3873,6 +4388,8 @@ fn is_read(kind: RequestKind) -> bool {
             | RequestKind::Jobs
             | RequestKind::Job
             | RequestKind::Health
+            | RequestKind::Cover
+            | RequestKind::BookstoreCategory
     )
 }
 
@@ -4162,6 +4679,45 @@ fn parse_categories(body: &[u8]) -> Option<Vec<Category>> {
     )
 }
 
+fn parse_bookstore_categories(body: &[u8]) -> Option<Vec<BookstoreCategory>> {
+    let text = std::str::from_utf8(body).ok()?;
+    let root = kobo_json::parse(text).ok()?;
+    Some(
+        root.get("categories")?
+            .as_array()?
+            .iter()
+            .filter_map(|category| {
+                Some(BookstoreCategory {
+                    id: category.get("id")?.as_str()?.to_owned(),
+                    name: category.get("name")?.as_str()?.to_owned(),
+                    path: category
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            category.get("name").and_then(Value::as_str).unwrap_or("")
+                        })
+                        .to_owned(),
+                    held: category.get("held")?.as_i64()?,
+                    bookstore_total: category.get("bookstore_total").and_then(Value::as_i64),
+                })
+            })
+            .take(MAX_CATEGORIES)
+            .collect(),
+    )
+}
+
+fn parse_bookstore_category(body: &[u8]) -> Option<(String, Option<String>)> {
+    let text = std::str::from_utf8(body).ok()?;
+    let root = kobo_json::parse(text).ok()?;
+    let state = root.get("state")?.as_str()?.to_owned();
+    let path = root
+        .get("category")
+        .and_then(|category| category.get("path"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((state, path))
+}
+
 /// A browsed page, the orders it can be read in, and which way it can be
 /// turned.
 ///
@@ -4318,6 +4874,42 @@ fn parse_catalog_status_note(body: &[u8]) -> Option<String> {
     (!messages.is_empty()).then(|| messages.join(" "))
 }
 
+/// Unpack the proxy's panel-ready cover body into the greys that
+/// `Context::put_picture` accepts. The proxy owns image decoding, scaling and
+/// dithering; the Kobo only validates a small bounded wire format and expands
+/// each four-bit level back to the runtime's byte-per-pixel representation.
+fn decode_cover(body: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    const HEADER_BYTES: usize = 8;
+    const MAX_WIDTH: u32 = 1072;
+    const MAX_HEIGHT: u32 = 1448;
+    const MAGIC: &[u8; 4] = b"PNC1";
+
+    if body.len() < HEADER_BYTES || &body[..4] != MAGIC {
+        return None;
+    }
+    let width = u32::from(u16::from_be_bytes([body[4], body[5]]));
+    let height = u32::from(u16::from_be_bytes([body[6], body[7]]));
+    if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
+        return None;
+    }
+    let pixels = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let packed_bytes = pixels.div_ceil(2);
+    if body.len() != HEADER_BYTES + packed_bytes {
+        return None;
+    }
+
+    let mut grey = Vec::with_capacity(pixels);
+    for byte in &body[HEADER_BYTES..] {
+        grey.push((byte >> 4) * 17);
+        if grey.len() < pixels {
+            grey.push((byte & 0x0f) * 17);
+        }
+    }
+    Some((width, height, grey))
+}
+
 fn parse_books(body: &[u8]) -> Option<Vec<Book>> {
     let text = std::str::from_utf8(body).ok()?;
     let root = kobo_json::parse(text).ok()?;
@@ -4422,22 +5014,24 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_label, availability_summary, category_summary, compact_message,
-        is_active_state, kind_label, ordinal, parse_books, parse_browse, parse_catalog_status_note,
-        parse_categories, parse_groups, parse_health, parse_job, parse_jobs, parse_publications,
-        parse_search, parse_shelf, plain_date, publication_summary, published_label,
-        resolve_explanation, settled_message, sign_in_advice, state_label, turned,
-        unresolved_summary, Book, BrowseQuery, Category, Group, Job, Paging, PretNumerique,
-        Publication, ShelfEntry, Sort, Source, View, Watch, ACKNOWLEDGE, API, BACK, CONFIRM_RETURN,
-        DESCRIPTION, FILTERS, NEXT_PAGE, PREVIOUS_PAGE, READER, RELATED, RETRY_HOOK, SEARCH,
-        SHOW_PDF, SUBMIT_SEARCH,
+        availability_label, availability_summary, bookstore_category_summary, category_summary,
+        compact_message, decode_cover, is_active_state, kind_label, ordinal, parse_books,
+        parse_bookstore_categories, parse_bookstore_category, parse_browse,
+        parse_catalog_status_note, parse_categories, parse_groups, parse_health, parse_job,
+        parse_jobs, parse_publications, parse_search, parse_shelf, plain_date, publication_summary,
+        published_label, resolve_explanation, settled_message, sign_in_advice, state_label, turned,
+        unresolved_summary, Book, BookstoreCategory, BrowseQuery, Category, Group, Job, Paging,
+        PretNumerique, Publication, ShelfEntry, Sort, Source, View, Watch, ACKNOWLEDGE, API, BACK,
+        CONFIRM_RETURN, DESCRIPTION, FILTERS, NEXT_PAGE, PREVIOUS_PAGE, READER, RELATED,
+        RETRY_HOOK, SEARCH, SHOW_PDF, SUBMIT_SEARCH,
     };
     use kobo_sdk::{
         action_id, AppRunner, BannerLevel, Command, Context, DiagnosticSeverity, KoboApp,
         StoreResult, Task, TaskError,
     };
     use kobo_ui::{
-        Chrome, DisplayMetrics, LayoutIssueKind, LayoutKind, TextScale, CLARA_BW_METRICS,
+        Chrome, DisplayMetrics, LayoutIssueKind, LayoutKind, TextScale, TilePicture,
+        CLARA_BW_METRICS,
     };
 
     fn source() -> Source {
@@ -4450,6 +5044,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn panel_ready_cover_is_unpacked_and_rejects_bad_bodies() {
+        // PNC1, 3×1, pixels 0, 1 and 15. The last low nibble is padding and
+        // must not become a fourth pixel.
+        let body = [b'P', b'N', b'C', b'1', 0, 3, 0, 1, 0x01, 0xf0];
+        assert_eq!(decode_cover(&body), Some((3, 1, vec![0, 17, 255])));
+
+        for invalid in [
+            &body[..7],
+            &[b'X', b'N', b'C', b'1', 0, 3, 0, 1, 0x01, 0xf0][..],
+            &[b'P', b'N', b'C', b'1', 0, 0, 0, 1, 0x00][..],
+            &[b'P', b'N', b'C', b'1', 0, 3, 0, 1, 0x01][..],
+        ] {
+            assert_eq!(decode_cover(invalid), None);
+        }
+    }
+
     /// The read each screen is drawn waiting for. A book's blurb is already in
     /// hand by the time there is a row to open it with, so that screen is the
     /// one that waits for nothing.
@@ -4457,6 +5068,7 @@ mod tests {
         match view {
             View::Discover => Some(super::RequestKind::Discovery),
             View::Categories => Some(super::RequestKind::CategoryList),
+            View::BookstoreCategories => Some(super::RequestKind::BookstoreCategories),
             View::Browse => Some(super::RequestKind::Browse),
             View::Results => Some(super::RequestKind::Search),
             View::Related => Some(super::RequestKind::Related),
@@ -5301,19 +5913,24 @@ mod tests {
     #[test]
     fn a_refused_borrow_says_so_and_reloads_what_needs_a_person() {
         let mut app = PretNumerique::default();
-        app.handle_failed(super::RequestKind::Borrow, TaskError::Offline);
+        let mut context = Context::default();
+        app.handle_failed(&mut context, super::RequestKind::Borrow, TaskError::Offline);
         let offline = app.note.clone().expect("a note");
         assert!(offline.contains("not on a network"));
         assert!(offline.contains("nothing was borrowed"));
 
-        app.handle_failed(super::RequestKind::Borrow, TaskError::NotFound);
+        app.handle_failed(
+            &mut context,
+            super::RequestKind::Borrow,
+            TaskError::NotFound,
+        );
         assert!(app
             .note
             .as_deref()
             .is_some_and(|note| note.contains("Look in Library")));
         assert_eq!(app.queued_request, Some(super::RequestKind::Books));
 
-        app.handle_failed(super::RequestKind::Return, TaskError::Offline);
+        app.handle_failed(&mut context, super::RequestKind::Return, TaskError::Offline);
         assert!(app
             .note
             .as_deref()
@@ -5382,7 +5999,7 @@ mod tests {
     }
 
     #[test]
-    fn state_store_keeps_the_query_and_nothing_else() {
+    fn state_store_keeps_the_query_and_favorites() {
         let mut app = PretNumerique::default();
         let mut context = Context::default();
         app.on_start(&mut context);
@@ -5397,14 +6014,15 @@ mod tests {
         );
         assert!(app.loaded_state);
         assert_eq!(app.query, "Dune");
-        assert_eq!(app.state_bytes(), b"Dune\n");
+        assert_eq!(app.state_bytes(), b"Dune\n\n");
     }
 
     /// Every screen this app can be looked at, except the one it draws on its
     /// way out and the keyboard, which carries its own Cancel.
-    const VIEWS: [View; 14] = [
+    const VIEWS: [View; 15] = [
         View::Discover,
         View::Categories,
+        View::BookstoreCategories,
         View::Browse,
         View::Filters,
         View::Search,
@@ -5564,9 +6182,12 @@ mod tests {
             browse: BrowseQuery {
                 title: "Enfant, adolescent et enseignement".to_owned(),
                 category: Some("YB".to_owned()),
+                audience: None,
                 author: None,
                 sort: Some("rating_desc".to_owned()),
                 page: 2,
+                available_only: false,
+                bookstore: false,
             },
             browsed: many(9),
             sorts: vec![
@@ -5694,6 +6315,67 @@ mod tests {
                     errors.join("; ")
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_detail_cover_does_not_push_the_library_choices_off_the_panel() {
+        typeset();
+        for (name, metrics) in CONTENT_PANELS {
+            let app = PretNumerique {
+                view: View::Detail,
+                detail: Some(described(publication("Cover fixture", vec![source()]))),
+                cover: Some(TilePicture::new(super::PictureHandle(41), 260, 419)),
+                metrics,
+                ..PretNumerique::default()
+            };
+            let errors = app
+                .screen()
+                .diagnostics(&metrics, &device_chrome())
+                .issues
+                .into_iter()
+                .filter(|issue| issue.severity == DiagnosticSeverity::Error)
+                .map(|issue| issue.to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                errors.is_empty(),
+                "{name} refused a cover: {}",
+                errors.join("; ")
+            );
+        }
+    }
+
+    #[test]
+    fn bookstore_category_rows_and_favorites_fit_every_panel() {
+        typeset();
+        for (name, metrics) in CONTENT_PANELS {
+            let app = PretNumerique {
+                view: View::BookstoreCategories,
+                bookstore_categories: (0..5)
+                    .map(|index| BookstoreCategory {
+                        id: format!("{index}"),
+                        name: format!("Category {index}"),
+                        path: format!("Jeunesse / Category {index}"),
+                        held: 16,
+                        bookstore_total: Some(1000),
+                    })
+                    .collect(),
+                metrics,
+                ..PretNumerique::default()
+            };
+            let errors = app
+                .screen()
+                .diagnostics(&metrics, &device_chrome())
+                .issues
+                .into_iter()
+                .filter(|issue| issue.severity == DiagnosticSeverity::Error)
+                .map(|issue| issue.to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                errors.is_empty(),
+                "{name} refused bookstore categories: {}",
+                errors.join("; ")
+            );
         }
     }
 
@@ -6473,9 +7155,12 @@ mod tests {
             browse: BrowseQuery {
                 title: "Children's".to_owned(),
                 category: Some("Y".to_owned()),
+                audience: None,
                 author: None,
                 sort: None,
                 page: 3,
+                available_only: false,
+                bookstore: false,
             },
             browsed: vec![publication("Somewhere in the middle", vec![source()])],
             sorts: vec![
@@ -6563,6 +7248,28 @@ mod tests {
         assert_eq!(app.app().view, View::Browse);
         let url = fetched(commands).expect("a subject is browsed for");
         assert!(url.contains("category=Y"), "{url}");
+    }
+
+    #[test]
+    fn bookstore_categories_and_a_book_category_keep_the_cross_reference_shape() {
+        let categories = parse_bookstore_categories(
+            br#"{"categories":[{"id":"231","name":"Romans 10-14 ans","path":"Jeunesse / Romans 10-14 ans","held":16,"bookstore_total":25561}]}"#,
+        )
+        .expect("a readable bookstore category list");
+        assert_eq!(categories[0].path, "Jeunesse / Romans 10-14 ans");
+        assert_eq!(
+            bookstore_category_summary(&categories[0]),
+            "16 in your libraries · 25,561 in leslibraires.ca"
+        );
+        assert_eq!(
+            parse_bookstore_category(
+                br#"{"isbn":"9782898636363","state":"known","category":{"id":"231","path":"Jeunesse / Romans 10-14 ans"}}"#,
+            ),
+            Some((
+                "known".to_owned(),
+                Some("Jeunesse / Romans 10-14 ans".to_owned()),
+            ))
+        );
     }
 
     #[test]
@@ -6760,9 +7467,12 @@ mod tests {
             browse: BrowseQuery {
                 title: "Children's".to_owned(),
                 category: Some("Y".to_owned()),
+                audience: None,
                 author: None,
                 sort: None,
                 page: 4,
+                available_only: false,
+                bookstore: false,
             },
             browsed: vec![publication("Somewhere in the middle", vec![source()])],
             // A list the catalogue offered no orders for. The filter is still

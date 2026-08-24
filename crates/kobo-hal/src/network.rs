@@ -30,6 +30,7 @@
 use crate::reader::{read_argv, Reader, ReaderError};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -259,6 +260,14 @@ impl Connection {
         if !went_offline(link, SETTLE) {
             return Ok(Restored::Unaffected);
         }
+        // Nickel often leaves both owners alive but the association and lease
+        // behind them stale. Starting another pair would race with those
+        // owners; ask the existing pair to reconnect first, then only start a
+        // missing daemon below if the route still does not return.
+        kick_existing(link);
+        if wait_until_online(link, within) {
+            return Ok(Restored::Restarted);
+        }
         for daemon in &self.daemons {
             // Starting a second copy of a daemon that is already running would
             // leave two of them fighting over one interface, which is worse
@@ -273,6 +282,34 @@ impl Connection {
         } else {
             Restored::StillDown
         })
+    }
+}
+
+/// Nudges the stock network owners after Nickel has handed the radio back.
+/// Both commands are best-effort: older firmwares may not ship one of the
+/// tools, in which case the captured daemon command remains the fallback.
+fn kick_existing(link: &str) {
+    for tool in [
+        "/bin/wpa_cli",
+        "/sbin/wpa_cli",
+        "/usr/sbin/wpa_cli",
+        "/usr/bin/wpa_cli",
+    ] {
+        if Path::new(tool).is_file() {
+            let _ = Command::new(tool).args(["-i", link, "reconnect"]).status();
+            break;
+        }
+    }
+    for tool in [
+        "/sbin/dhcpcd",
+        "/bin/dhcpcd",
+        "/usr/sbin/dhcpcd",
+        "/usr/bin/dhcpcd",
+    ] {
+        if Path::new(tool).is_file() {
+            let _ = Command::new(tool).args(["-n", link]).status();
+            break;
+        }
     }
 }
 
