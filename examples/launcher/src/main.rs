@@ -71,7 +71,7 @@ const ENTRIES: &[Entry] = &[
     Entry {
         name: "pret-numerique",
         title: "Prêt numérique",
-        label: "Library loans",
+        label: "Prêt numérique",
         summary: "Search Montréal and BAnQ; borrow and return through your home proxy.",
         needs: "Uses Wi-Fi and the installed pret-numerique-api secret. No book is saved here.",
         glyph: Glyph::Book,
