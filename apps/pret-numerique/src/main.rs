@@ -39,7 +39,7 @@ const COVER_HEIGHT: u32 = 419;
 const COVER_MAX_BYTES: u32 = 1_300_000;
 const MAX_RESULTS: usize = 40;
 const MAX_QUERY_CHARS: usize = 80;
-const MAX_DETAIL_DESCRIPTION_CHARS: usize = 88;
+const MAX_DETAIL_DESCRIPTION_CHARS: usize = 180;
 /// The whole of a blurb, kept because there is now a screen that shows it.
 ///
 /// The libraries' longest runs to a little under 3,900 characters, so this
@@ -98,9 +98,9 @@ const MAX_PAGE_ROWS: usize = 8;
 /// the rest, rather than two lists with one book each, which says nothing about
 /// either.
 const DISCOVER_GROUPS_PER_PAGE: usize = 1;
-/// The content height above which a book's screen carries its blurb as well as
-/// the ways on from it. A Clara has 1190 pixels of content and an Elipsa 1677;
-/// a Nia has 842, which is one block short.
+/// A book's screen carries a description preview whenever the panel can
+/// spare one optional block. A Clara has 1190 pixels of content and an
+/// Elipsa 1677; a Nia has 842, which is one block short.
 const TALL_PANEL: i32 = 1000;
 const MAX_GROUPS: usize = 40;
 const MAX_CATEGORIES: usize = 40;
@@ -1935,7 +1935,7 @@ impl PretNumerique {
         if busy {
             0
         } else if self.cover.is_some() {
-            usize::from(self.content_height() >= 1600)
+            usize::from(self.content_height() >= TALL_PANEL)
         } else if self.content_height() >= TALL_PANEL {
             2
         } else {
@@ -1966,13 +1966,21 @@ impl PretNumerique {
             .cover
             .map(|_| self.metrics.tenth_mm(240) + self.gap())
             .unwrap_or(0);
+        // The cover column and the one preview block leave one measured
+        // optional-block allowance of white space on the Clara-sized profile.
+        // Give that space back so the publication date survives alongside the
+        // description.
+        let cover_description_bonus = (cover > 0 && extras == 1)
+            .then_some(DETAIL_EXTRA_COST)
+            .unwrap_or(0);
         let libraries = i32::try_from(libraries).unwrap_or(2).max(1);
         let room = self.content_height()
             - DETAIL_FURNITURE
             - cover
             - libraries * LIBRARY_ROW_COST
             - extras * DETAIL_EXTRA_COST
-            - blurb;
+            - blurb
+            + cover_description_bonus;
         usize::try_from((room + self.gap()) / FACT_COST)
             .unwrap_or(MIN_DETAIL_FACTS)
             .max(MIN_DETAIL_FACTS)
