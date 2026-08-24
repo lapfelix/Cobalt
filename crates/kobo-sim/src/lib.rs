@@ -2460,8 +2460,13 @@ fn pret_publication(index: usize) -> Option<String> {
         } else {
             "All copies out"
         };
+        let available_on = if *free {
+            ""
+        } else {
+            r#","available_on":"2026-08-25T12:09:07.022Z""#
+        };
         sources.push(format!(
-            r#"{{"handle":"{handle}-{catalog}","catalog":"{catalog}","catalog_name":"{name}","availability":"{availability}","is_available":{free}}}"#
+            r#"{{"handle":"{handle}-{catalog}","catalog":"{catalog}","catalog_name":"{name}","availability":"{availability}","is_available":{free}{available_on}}}"#
         ));
     }
     // The edition, as the proxy sends it: a date and a publisher on nearly

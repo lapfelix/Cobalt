@@ -217,6 +217,7 @@ struct Source {
     catalog: String,
     catalog_name: String,
     availability: String,
+    available_on: Option<String>,
     available: bool,
 }
 
@@ -1347,7 +1348,12 @@ impl PretNumerique {
                     } else if borrowable {
                         format!("{} · Unavailable", source.catalog_name)
                     } else {
-                        format!("{} · Reserve", source.catalog_name)
+                        let expected = source
+                            .available_on
+                            .as_deref()
+                            .and_then(compact_date)
+                            .map(|date| format!("{} · {date}", source.catalog_name));
+                        expected.unwrap_or_else(|| format!("{} · Reserve", source.catalog_name))
                     };
                     let state = if source.available || !borrowable {
                         ControlState::Enabled
@@ -4329,6 +4335,17 @@ fn plain_date(value: &str) -> Option<String> {
     Some(format!("{day} {} {year}", MONTHS[month - 1]))
 }
 
+/// A hold button has room for a short expected date, not a full catalog
+/// timestamp. Keep the year out of the common case so the action remains
+/// compact; the catalog date itself is still retained in the API response.
+fn compact_date(value: &str) -> Option<String> {
+    let date = plain_date(value)?;
+    let mut parts = date.split_whitespace();
+    let day = parts.next()?;
+    let month = parts.next()?;
+    Some(format!("{day} {}", month.get(..3)?))
+}
+
 /// When an edition came out, as a person would say it: `April 2019`, or a bare
 /// year where that is all the catalogue knows.
 ///
@@ -4705,6 +4722,12 @@ fn parse_sources(result: &Value) -> Vec<Source> {
                             .and_then(Value::as_str)
                             .unwrap_or("Availability unknown")
                             .to_owned(),
+                        available_on: source
+                            .get("available_on")
+                            .or_else(|| source.get("availableOn"))
+                            .or_else(|| source.get("availability_until"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                         available: source
                             .get("is_available")
                             .or_else(|| source.get("isAvailable"))
@@ -5323,8 +5346,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        availability_summary, bookstore_category_summary, category_summary, compact_message,
-        decode_cover, is_active_state, kind_label, ordinal, parse_books,
+        availability_summary, bookstore_category_summary, category_summary, compact_date,
+        compact_message, decode_cover, is_active_state, kind_label, ordinal, parse_books,
         parse_bookstore_categories, parse_bookstore_category, parse_browse,
         parse_catalog_status_note, parse_categories, parse_groups, parse_health, parse_job,
         parse_jobs, parse_publications, parse_search, parse_shelf, plain_date, publication_summary,
@@ -5349,6 +5372,7 @@ mod tests {
             catalog: "montreal".to_owned(),
             catalog_name: "Montréal".to_owned(),
             availability: "available".to_owned(),
+            available_on: None,
             available: true,
         }
     }
@@ -5408,6 +5432,7 @@ mod tests {
             catalog: "banq".to_owned(),
             catalog_name: "BAnQ".to_owned(),
             availability: "On loan".to_owned(),
+            available_on: Some("2026-08-25T12:09:07.022Z".to_owned()),
             available: false,
         }
     }
@@ -7843,6 +7868,11 @@ mod tests {
         assert_eq!(plain_date("soon"), None);
         assert_eq!(plain_date("2026-13-01"), None);
         assert_eq!(plain_date("2026-09-32"), None);
+        assert_eq!(
+            compact_date("2026-08-25T12:09:07.022Z").as_deref(),
+            Some("25 Aug")
+        );
+        assert_eq!(compact_date("not a date"), None);
         assert_eq!(ordinal(1), "1st");
         assert_eq!(ordinal(2), "2nd");
         assert_eq!(ordinal(3), "3rd");
@@ -7985,7 +8015,7 @@ mod tests {
         };
         let drawn = format!("{:?}", held.detail_screen());
         assert!(drawn.contains("Place a hold"));
-        assert!(drawn.contains("BAnQ · Reserve"));
+        assert!(drawn.contains("BAnQ · 25 Aug"));
         assert!(!drawn.contains("puts you on its waiting list"));
     }
 
