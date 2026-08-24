@@ -1,0 +1,32 @@
+# Discover is the first screen, and the merged answer is what its rows say: a
+# book out at Montréal and free at BAnQ reads as available, and names BAnQ.
+# Then a whole list, paged with buttons at both ends.
+clean
+expect Prêt numérique
+expect Recent releases
+expect Available now at BAnQ
+expect Every copy is out at Montréal and BAnQ
+expect Page 1 of 3
+expect Previous page
+expect Next page
+tap Next page
+wait-for En août, je lis québécois
+clean
+tap Previous page
+wait-for Recent releases
+clean
+tap See the whole list
+wait-for Recent acquisitions
+expect Recent releases
+clean
+expect Page 1
+tap Next page
+wait-for Page 2
+clean
+tap Previous page
+wait-for Page 1
+clean
+tap Mensonges
+wait-for Book details
+expect Available now at Montréal
+clean

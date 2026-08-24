@@ -10,12 +10,16 @@
 //!
 //! ## Why the keys are addressed by position
 //!
-//! A key's identity is where it is, not what it types. `Shift` and the symbol
-//! layer change every label on the panel but no cell moves, so a tap resolves
+//! A key's identity is where it is, not what it types. `Shift` and the layer
+//! keys change every label on the panel but no cell moves, so a tap resolves
 //! to a position and this module decides what that position means right now.
 //! Naming keys after their characters instead would need a different action id
-//! per layer, which is four times the identifiers and one more thing to get
-//! out of step with what is drawn.
+//! per layer, which with three layers and a shift is six times the identifiers
+//! and one more thing to get out of step with what is drawn.
+//!
+//! Every layer therefore holds exactly as many characters per row as the
+//! letters do. A constant asserts it, because a short row would slide every
+//! key after it onto a neighbour's cell and nothing at runtime could tell.
 //!
 //! ## Why there is no cursor
 //!
@@ -43,6 +47,54 @@ const LETTERS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 /// search queries and addresses.
 const SYMBOLS: [&str; 3] = ["1234567890", "-/:;()&@\"", ".,?!'+="];
 
+/// The third layer: every letter French writes with a diacritic, both
+/// ligatures, and the letters the rest of the catalogue needs.
+///
+/// This is not decoration. The catalogues these applications search are
+/// Québécois, so a majority of titles and author names carry one of these, and
+/// without them the search field cannot express what the reader is holding.
+///
+/// What earns a key is a character with no substitute a reader could think to
+/// type instead. That is why the last five are Spanish and Portuguese rather
+/// than more punctuation: an em dash, an ellipsis and a typographic apostrophe
+/// have `-`, `.` and `'` waiting on the symbol layer, and telling them apart is
+/// the search engine's job, not the panel's. The guillemets stay because ASCII
+/// has no French quotation mark, and this keyboard writes messages and notes as
+/// well as queries.
+///
+/// Grouped by base letter rather than by frequency: a reader hunting for `ë`
+/// finds it next to `é`, which is where the eye goes first.
+const ACCENTS: [&str; 3] = ["àâäçéèêëîï", "ôöùûüÿœæñ", "«»áíóúã"];
+
+/// Every layer is the same shape, because a key's identity is its position.
+///
+/// A layer with a row of a different length would move every key to its right
+/// and silently change what the cells before it type, which is the one failure
+/// the position scheme cannot detect at runtime. Cheaper to refuse to compile.
+const _: () = {
+    let mut row = 0;
+    while row < 3 {
+        assert!(row_length(SYMBOLS[row]) == row_length(LETTERS[row]));
+        assert!(row_length(ACCENTS[row]) == row_length(LETTERS[row]));
+        row += 1;
+    }
+};
+
+/// Characters, not bytes: the accent layer's keys are two bytes each.
+const fn row_length(row: &str) -> usize {
+    let bytes = row.as_bytes();
+    let mut characters = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        // A continuation byte is the tail of a character already counted.
+        if bytes[index] & 0b1100_0000 != 0b1000_0000 {
+            characters += 1;
+        }
+        index += 1;
+    }
+    characters
+}
+
 /// What a tap on the keyboard meant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Pressed {
@@ -61,6 +113,10 @@ pub enum Layer {
     #[default]
     Letters,
     Symbols,
+    /// The French diacritics. Reached by its own key rather than by cycling
+    /// through the symbols, because a Québécois catalogue needs it on most
+    /// searches and a cycle would charge two taps for the common case.
+    Accents,
 }
 
 /// An on-screen keyboard and the text typed on it.
@@ -132,8 +188,15 @@ impl Keyboard {
         }
         if action == crate::action_id(LAYER) {
             self.layer = match self.layer {
-                Layer::Letters => Layer::Symbols,
                 Layer::Symbols => Layer::Letters,
+                Layer::Letters | Layer::Accents => Layer::Symbols,
+            };
+            return Some(Pressed::Shifted);
+        }
+        if action == crate::action_id(ACCENT_LAYER) {
+            self.layer = match self.layer {
+                Layer::Accents => Layer::Letters,
+                Layer::Letters | Layer::Symbols => Layer::Accents,
             };
             return Some(Pressed::Shifted);
         }
@@ -176,7 +239,7 @@ impl Keyboard {
             for (column, character) in characters.chars().enumerate() {
                 if action == crate::action_id(&key_name(row, column)) {
                     return Some(if self.shift {
-                        character.to_ascii_uppercase()
+                        uppercase(character)
                     } else {
                         character
                     });
@@ -190,6 +253,7 @@ impl Keyboard {
         match self.layer {
             Layer::Letters => LETTERS,
             Layer::Symbols => SYMBOLS,
+            Layer::Accents => ACCENTS,
         }
     }
 
@@ -321,12 +385,38 @@ const CANCEL: &str = "kb.cancel";
 
 const SHIFT: &str = "kb.shift";
 const LAYER: &str = "kb.layer";
+const ACCENT_LAYER: &str = "kb.accents";
 const SPACE: &str = "kb.space";
 const BACKSPACE: &str = "kb.backspace";
 const ENTER: &str = "kb.enter";
 
+/// The face of the accent key. Three letters of what it opens, which needs no
+/// translating and no icon the renderer would have to carry a glyph for.
+///
+/// The runtime recognises a keyboard by its faces (`kobod`'s `keyboard_keys`),
+/// so this string is spelled out there too. Changing it means changing both.
+const ACCENT_FACE: &str = "éàç";
+
 fn key_name(row: usize, column: usize) -> String {
     format!("kb.r{row}c{column}")
+}
+
+/// The shifted face of a key.
+///
+/// Unicode's uppercase rather than ASCII's, which is not a detail: `é` is not
+/// an ASCII character, so `to_ascii_uppercase` returns it unchanged and a
+/// shifted accent layer would have typed lower case while drawing capitals.
+///
+/// A character whose uppercase is more than one character (German `ß` becomes
+/// `SS`) is left as it is. A key types one character, and widening that to a
+/// string would spread through [`Keyboard::resolves`] and into every terminal
+/// that reads a keystroke straight off the panel. No layer here holds one.
+fn uppercase(character: char) -> char {
+    let mut upper = character.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => single,
+        _ => character,
+    }
 }
 
 impl ScreenBuilder {
@@ -354,8 +444,13 @@ impl ScreenBuilder {
             if index == 2 {
                 cells.push((
                     SHIFT.to_string(),
+                    // "SHIFT" is 104 pixels of Atkinson in a 98 pixel cell on
+                    // the panel that ships, so the latched face was clipped.
+                    // One capital is enough of a difference: the loud signal
+                    // that shift is on is the other twenty-six keys, which are
+                    // all showing capitals at the same time.
                     if keyboard.is_shifted() {
-                        "SHIFT".to_string()
+                        "Shift".to_string()
                     } else {
                         "shift".to_string()
                     },
@@ -363,7 +458,7 @@ impl ScreenBuilder {
             }
             for (column, character) in characters.chars().enumerate() {
                 let label = if keyboard.is_shifted() {
-                    character.to_ascii_uppercase().to_string()
+                    uppercase(character).to_string()
                 } else {
                     character.to_string()
                 };
@@ -375,15 +470,28 @@ impl ScreenBuilder {
             let columns = u8::try_from(cells.len()).unwrap_or(u8::MAX);
             screen = screen.grid(columns, false, cells);
         }
+        // Four controls, and each one says where it takes you rather than what
+        // it is. A single key cycling three layers would read "?123" on the
+        // letters and leave the accents undiscoverable behind it, and cost the
+        // French reader two taps for the layer they need most. The two
+        // never both say "abc": only one of them leads back to the letters
+        // from wherever the keyboard is.
         screen.grid(
-            3,
+            4,
             false,
             [
                 (
                     LAYER.to_string(),
                     match keyboard.layer() {
-                        Layer::Letters => "?123".to_string(),
+                        Layer::Letters | Layer::Accents => "?123".to_string(),
                         Layer::Symbols => "abc".to_string(),
+                    },
+                ),
+                (
+                    ACCENT_LAYER.to_string(),
+                    match keyboard.layer() {
+                        Layer::Letters | Layer::Symbols => ACCENT_FACE.to_string(),
+                        Layer::Accents => "abc".to_string(),
                     },
                 ),
                 (SPACE.to_string(), "space".to_string()),
@@ -424,12 +532,64 @@ impl ScreenBuilder {
 #[cfg(test)]
 mod tests {
     use super::TextEntry;
-    use super::{Keyboard, Layer, Pressed, MAX_TEXT};
+    use super::{key_name, Keyboard, Layer, Pressed, ACCENTS, ACCENT_FACE, MAX_TEXT};
     use crate::{action_id, ScreenBuilder};
-    use kobo_ui::{Chrome, LayoutKind, CLARA_BW_METRICS};
+    use kobo_ui::{
+        Chrome, DisplayMetrics, LayoutIssueKind, LayoutKind, TextScale, CLARA_BW_METRICS,
+    };
+
+    /// The panels this keyboard has to fit: the two the hardware gate supports
+    /// (`kobo_profile::SUPPORTED_PROFILES`), and the Nia, which is the fewest
+    /// pixels the design system is built to reach. A row of ten keys is a
+    /// division, so the narrowest panel is the one that decides.
+    const PANELS: [(&str, DisplayMetrics); 3] = [
+        ("clara", CLARA_BW_METRICS),
+        (
+            "elipsa-2e",
+            DisplayMetrics {
+                width: 1404,
+                height: 1872,
+                pixels_per_inch: 227,
+                text_scale: TextScale::Default,
+            },
+        ),
+        (
+            "nia",
+            DisplayMetrics {
+                width: 758,
+                height: 1024,
+                pixels_per_inch: 212,
+                text_scale: TextScale::Default,
+            },
+        ),
+    ];
 
     fn tap(keyboard: &mut Keyboard, name: &str) -> Option<Pressed> {
         keyboard.press(action_id(name))
+    }
+
+    /// Presses whichever layer key leads to `layer` from the letters.
+    fn reach(keyboard: &mut Keyboard, layer: Layer) {
+        match layer {
+            Layer::Letters => {}
+            Layer::Symbols => {
+                tap(keyboard, "kb.layer");
+            }
+            Layer::Accents => {
+                tap(keyboard, "kb.accents");
+            }
+        }
+        assert_eq!(keyboard.layer(), layer);
+    }
+
+    /// Every character a layer can type, written out rather than read from the
+    /// constant, so that a test can fail when the layout changes underneath it.
+    fn faces(layer: Layer) -> &'static str {
+        match layer {
+            Layer::Letters => "qwertyuiopasdfghjklzxcvbnm",
+            Layer::Symbols => "1234567890-/:;()&@\".,?!'+=",
+            Layer::Accents => "àâäçéèêëîïôöùûüÿœæñ«»áíóúã",
+        }
     }
 
     /// A keyboard belongs under the thumbs.
@@ -494,6 +654,108 @@ mod tests {
         assert_eq!(keyboard.text(), "q1");
     }
 
+    /// The reason the third layer exists: these titles are on the shelf.
+    #[test]
+    fn the_accent_layer_types_a_title_from_the_catalogue() {
+        let mut keyboard = Keyboard::new();
+        reach(&mut keyboard, Layer::Accents);
+        // "mûre" and "rafraîchissant" need û and î; neither is on the letters.
+        tap(&mut keyboard, "kb.r1c3"); // û
+        tap(&mut keyboard, "kb.r0c8"); // î
+        tap(&mut keyboard, "kb.accents");
+        assert_eq!(keyboard.layer(), Layer::Letters);
+        tap(&mut keyboard, "kb.r1c0"); // a
+        assert_eq!(keyboard.text(), "ûîa");
+    }
+
+    /// Shift used to be `to_ascii_uppercase`, which is a no-op on every one of
+    /// these: the panel would have drawn a capital and typed a small letter.
+    #[test]
+    fn shift_uppercases_every_key_on_the_accent_layer() {
+        let mut typed = String::new();
+        for (row, characters) in ACCENTS.iter().enumerate() {
+            for column in 0..characters.chars().count() {
+                let mut keyboard = Keyboard::new();
+                reach(&mut keyboard, Layer::Accents);
+                tap(&mut keyboard, "kb.shift");
+                tap(&mut keyboard, &key_name(row, column));
+                typed.push_str(keyboard.text());
+            }
+        }
+        // Written out, not computed: computing it with the same call the code
+        // under test uses would pass however wrong that call was. The
+        // guillemets have no upper case and come through unchanged.
+        assert_eq!(typed, "ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜŸŒÆÑ«»ÁÍÓÚÃ");
+    }
+
+    /// A key face that lies about where it goes is worse than no key: the
+    /// reader taps it, the panel repaints, and the letters are still gone.
+    #[test]
+    fn each_layer_key_says_where_it_leads() {
+        for layer in [Layer::Letters, Layer::Symbols, Layer::Accents] {
+            let mut keyboard = Keyboard::new();
+            reach(&mut keyboard, layer);
+            let screen = ScreenBuilder::new("keyboard")
+                .keyboard(&keyboard, "Send")
+                .build();
+            let layout = screen.layout_with(&CLARA_BW_METRICS, &Chrome::default());
+            let faces = layout
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind, LayoutKind::CellLabel))
+                .filter_map(|node| node.text_lines.first().cloned())
+                .collect::<Vec<_>>();
+            let back = faces.iter().filter(|face| *face == "abc").count();
+            assert_eq!(
+                back,
+                usize::from(layer != Layer::Letters),
+                "{layer:?} drew {back} keys offering the letters: {faces:?}"
+            );
+            for face in [
+                if layer == Layer::Accents {
+                    "abc"
+                } else {
+                    ACCENT_FACE
+                },
+                if layer == Layer::Symbols {
+                    "abc"
+                } else {
+                    "?123"
+                },
+            ] {
+                assert!(faces.iter().any(|drawn| drawn == face), "{layer:?}: {face}");
+            }
+        }
+    }
+
+    /// The control row grew a fourth key, and a key too narrow to hit is a key
+    /// that is not there. Checked on the narrowest panel this SDK draws for as
+    /// well as the one that ships, because the answer is a division.
+    #[test]
+    fn every_key_can_be_hit_on_every_panel() {
+        for (name, metrics) in PANELS {
+            for layer in [Layer::Letters, Layer::Symbols, Layer::Accents] {
+                let mut keyboard = Keyboard::new();
+                reach(&mut keyboard, layer);
+                let mut entry = TextEntry::new();
+                entry.open();
+                let screen = ScreenBuilder::new("keyboard")
+                    .text_entry(&entry, "Search the libraries", "Search")
+                    .keyboard(&keyboard, "Search")
+                    .build();
+                let undersized = screen
+                    .diagnostics(&metrics, &Chrome::with_back(true))
+                    .issues
+                    .into_iter()
+                    .filter(|issue| {
+                        matches!(issue.kind, LayoutIssueKind::TouchTargetTooSmall { .. })
+                    })
+                    .collect::<Vec<_>>();
+                assert!(undersized.is_empty(), "{name}, {layer:?}: {undersized:?}");
+            }
+        }
+    }
+
     #[test]
     fn backspace_removes_a_whole_character_rather_than_a_byte() {
         // Truncating by byte would leave the string invalid, and backspace is
@@ -546,11 +808,9 @@ mod tests {
         // The keyboard is drawn by one function and decoded by another, and
         // nothing but this test stops them drifting apart. It lays the real
         // screen out and taps the middle of every cell.
-        for layer in [Layer::Letters, Layer::Symbols] {
+        for layer in [Layer::Letters, Layer::Symbols, Layer::Accents] {
             let mut drawn = Keyboard::new();
-            if layer == Layer::Symbols {
-                drawn.press(action_id("kb.layer"));
-            }
+            reach(&mut drawn, layer);
             let screen = ScreenBuilder::new("keyboard")
                 .keyboard(&drawn, "Send")
                 .build();
@@ -580,12 +840,7 @@ mod tests {
                 }
             }
             // Every character of the layer, plus the space the space bar types.
-            for character in match layer {
-                Layer::Letters => "qwertyuiopasdfghjklzxcvbnm",
-                Layer::Symbols => "1234567890-/:;()&@\".,?!'+=",
-            }
-            .chars()
-            {
+            for character in faces(layer).chars() {
                 assert!(
                     typed.contains(character),
                     "{character} is drawn but cannot be typed"

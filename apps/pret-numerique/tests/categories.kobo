@@ -1,0 +1,19 @@
+# The merged subject list, paged, and a subject that opens as a browse.
+clean
+tap Categories
+wait-for Browse by subject
+expect Children's, Teenage & Educational
+expect 11,594 books · Montréal and BAnQ
+expect Page 1 of 2
+clean
+tap Next page
+wait-for Mathematics & Science
+clean
+tap Previous page
+wait-for Fiction & Related items
+tap Fiction & Related items
+wait-for Recent acquisitions
+expect Fiction & Related items
+clean
+tap Back
+wait-for Browse by subject

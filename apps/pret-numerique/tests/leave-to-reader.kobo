@@ -7,7 +7,7 @@
 clean
 expect Kobo reader
 tap Library
-wait-for My loans
+wait-for My books
 expect Kobo reader
 tap Settings
 wait-for Connection

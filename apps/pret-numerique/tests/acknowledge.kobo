@@ -1,9 +1,9 @@
-# Acknowledging is the only way past a borrow or return the proxy refuses to
-# guess about, so both paths are driven end to end: the borrow that has no loan
-# to sit against, then the return that has one.
+# Acknowledging is the only way past a borrow, a hold or a return the proxy
+# refuses to guess about, so every path is driven: the borrow that has no loan
+# to sit against, the hold that has none either, then the return that has one.
 clean
 tap Library
-wait-for My loans
+wait-for My books
 wait-for Needs your attention
 tap Uncertain fixture title
 wait-for Needs you
@@ -18,6 +18,20 @@ wait-for Cleared
 # so the row goes on the answer to that read, not on this tap.
 wait 2000
 expect-missing Uncertain fixture title
+tap Uncertain fixture hold
+wait-for Needs you
+expect cannot tell whether BAnQ put you in line
+expect places no hold and cancels
+expect I checked my account
+clean
+tap I checked my account
+wait-for Cleared
+wait 2000
+expect-missing Uncertain fixture hold
+# One library at a time: with nothing needing a person the page holds the
+# loans, and the unconfirmed return is one of Montréal's.
+tap Montréal
+wait-for My books
 tap Fixture uncertain return
 wait-for Needs you
 expect took this loan

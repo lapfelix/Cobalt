@@ -2080,7 +2080,7 @@ fn pret_state() -> std::sync::MutexGuard<'static, PretFixtureState> {
 /// The settled requests the fixture starts with, newest first, as `/jobs`
 /// returns them. Between them they reach every surface the app has for an
 /// outcome only a person can settle.
-const PRET_SETTLED_JOBS: [(&str, &str); 4] = [
+const PRET_SETTLED_JOBS: [(&str, &str); 5] = [
     (
         "fixture-uncertain",
         r#"{"id":"fixture-uncertain","kind":"borrow","state":"borrow_uncertain","title":"Uncertain fixture title","catalog":"montreal","book_id":null,"created_at":"2026-08-23T12:40:00Z","updated_at":"2026-08-23T12:41:00Z","error_message":"Montréal took the request and then stopped answering, so the loan could not be confirmed.","dedup_key":"borrow:montreal:fixture-uncertain"}"#,
@@ -2088,6 +2088,10 @@ const PRET_SETTLED_JOBS: [(&str, &str); 4] = [
     (
         "fixture-return-uncertain",
         r#"{"id":"fixture-return-uncertain","kind":"return","state":"return_uncertain","title":"Fixture uncertain return","catalog":"montreal","book_id":"fixture-book-uncertain","created_at":"2026-08-23T12:30:00Z","updated_at":"2026-08-23T12:31:00Z","error_message":"Montréal did not confirm the return, so the loan is still listed.","dedup_key":"return:fixture-book-uncertain"}"#,
+    ),
+    (
+        "fixture-hold-uncertain",
+        r#"{"id":"fixture-hold-uncertain","kind":"hold","state":"hold_uncertain","title":"Uncertain fixture hold","catalog":"banq","book_id":null,"created_at":"2026-08-23T12:25:00Z","updated_at":"2026-08-23T12:26:00Z","error_message":"BAnQ took the request and then stopped answering, so the place in line could not be confirmed.","dedup_key":"hold:banq:fixture-hold-uncertain"}"#,
     ),
     (
         "fixture-hook",
@@ -2101,8 +2105,15 @@ const PRET_SETTLED_JOBS: [(&str, &str); 4] = [
 
 /// The requests the fixture carries through to a settled state: id, kind,
 /// title, catalog, and the book they belong to once there is one.
-const PRET_ACTIVE_JOBS: [(&str, &str, &str, &str, &str); 5] = [
+const PRET_ACTIVE_JOBS: [(&str, &str, &str, &str, &str); 6] = [
     ("fixture-borrow-job", "borrow", "Dune", "montreal", ""),
+    (
+        "fixture-hold-job",
+        "hold",
+        "Qui va séduire Henry ?",
+        "montreal",
+        "",
+    ),
     ("fixture-hamlet-borrow-job", "borrow", "Hamlet", "banq", ""),
     (
         "fixture-earthsea-borrow-job",
@@ -2131,6 +2142,9 @@ fn pret_progress(id: &str) -> &'static [&'static str] {
     match id {
         "fixture-return-job" => &["returning", "returned"],
         "fixture-hook" => &["hook_running", "complete"],
+        // A hold reaches the library and stops there. There is no file to
+        // fetch and nothing to send to the reader.
+        "fixture-hold-job" => &["holding", "complete"],
         _ => &["borrowing", "downloading", "complete"],
     }
 }
@@ -2210,6 +2224,255 @@ fn pret_books_body() -> Vec<u8> {
     .into_bytes()
 }
 
+/// One book in the fixture's catalogue: handle, title, author, and whether
+/// Montréal and BAnQ each have a copy free.
+///
+/// `None` means that library does not carry the book at all, `Some(false)` that
+/// every copy of it is out.
+type PretBook = (
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<bool>,
+    Option<bool>,
+);
+
+/// The fixture's catalogue, drawn from the recorded Montréal and BAnQ
+/// responses.
+///
+/// The first entry is out at Montréal and free at BAnQ, which is the case the
+/// merged availability exists for; the second is out at both, which is the only
+/// case that offers a hold; the last is a PDF and nothing else.
+const PRET_BOOKS: [PretBook; 11] = [
+    (
+        "fixture-triplettes",
+        "Les triplettes - Tome 1",
+        "Ariane Michaud",
+        Some(false),
+        Some(true),
+    ),
+    (
+        "fixture-henry",
+        "Qui va séduire Henry ?",
+        "Marilou Addison",
+        Some(false),
+        Some(false),
+    ),
+    (
+        "fixture-mensonges",
+        "Mensonges",
+        "Marilou Addison",
+        Some(true),
+        None,
+    ),
+    (
+        "fixture-volant",
+        "Les mains sur le volant",
+        "Marilou Addison",
+        Some(true),
+        Some(true),
+    ),
+    (
+        "fixture-noel",
+        "Un dernier arrêt avant Noël",
+        "Marilou Addison",
+        Some(true),
+        None,
+    ),
+    (
+        "fixture-resolument",
+        "Résolument moi !",
+        "Marilou Addison",
+        Some(true),
+        Some(false),
+    ),
+    (
+        "fixture-mousse",
+        "Mousse aux fraises T.18",
+        "Marilou Addison",
+        Some(false),
+        Some(true),
+    ),
+    (
+        "fixture-lynch",
+        "La maison du rang Lynch",
+        "Alexie Morin",
+        Some(true),
+        None,
+    ),
+    (
+        "fixture-somnambule",
+        "Le Somnambule",
+        "Lars Kepler",
+        None,
+        Some(true),
+    ),
+    (
+        "fixture-eliza",
+        "Typiquement Eliza",
+        "Sophie Lee",
+        None,
+        Some(false),
+    ),
+    // The one title neither library has as anything but a PDF. Left out of
+    // every list unless it is asked for, exactly as the proxy leaves it out.
+    (
+        "fixture-guide",
+        "Le guide illustré du potager",
+        "Lise Tremblay",
+        Some(true),
+        None,
+    ),
+];
+
+/// The index of the fixture's PDF-only title.
+const PRET_PDF_BOOK: usize = 10;
+
+fn pret_publication(index: usize) -> Option<String> {
+    let (handle, title, author, montreal, banq) = PRET_BOOKS.get(index)?;
+    let mut sources = Vec::new();
+    for (catalog, name, state) in [("montreal", "Montréal", montreal), ("banq", "BAnQ", banq)] {
+        let Some(free) = state else {
+            continue;
+        };
+        let availability = if *free {
+            "Available now"
+        } else {
+            "All copies out"
+        };
+        sources.push(format!(
+            r#"{{"handle":"{handle}-{catalog}","catalog":"{catalog}","catalog_name":"{name}","availability":"{availability}","is_available":{free}}}"#
+        ));
+    }
+    Some(format!(
+        r#"{{"handle":"{handle}","title":"{title}","authors":["{author}"],"isbn":"9782898592102","pdf_only":{},"description":"One of the fixture's books, described in a sentence so the detail screen has something to bound.","sources":[{}]}}"#,
+        index == PRET_PDF_BOOK,
+        sources.join(",")
+    ))
+}
+
+fn pret_publications(indices: &[usize]) -> String {
+    indices
+        .iter()
+        .filter_map(|index| pret_publication(*index))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The merged home page: one list both libraries publish, then one from each.
+fn pret_discovery_body() -> Vec<u8> {
+    format!(
+        r#"{{"groups":[
+{{"title":"Recent releases","category":"recent","total":3204,"publications":[{}]}},
+{{"title":"En août, je lis québécois","category":"aout","total":18,"publications":[{}]}},
+{{"title":"Littérature queer","category":"queer","total":12,"publications":[{}]}}]}}"#,
+        pret_publications(&[0, 1, 2, 3, 4]),
+        pret_publications(&[7, 5, 6]),
+        pret_publications(&[8, 9])
+    )
+    .into_bytes()
+}
+
+fn pret_categories_body() -> Vec<u8> {
+    br#"{"categories":[
+{"name":"Children's, Teenage & Educational","key":"Y","catalogs":["montreal","banq"],"total":11594},
+{"name":"Fiction & Related items","key":"F","catalogs":["montreal","banq"],"total":9803},
+{"name":"Biography, Literature & Literary studies","key":"D","catalogs":["montreal","banq"],"total":2211},
+{"name":"Graphic novels, Comic books, Cartoons","key":"X","catalogs":["montreal","banq"],"total":1408},
+{"name":"The Arts","key":"A","catalogs":["montreal"],"total":604},
+{"name":"Mathematics & Science","key":"P","catalogs":["banq"],"total":331}]}"#
+        .to_vec()
+}
+
+/// A browsed page. A category walks three pages so the buttons at both ends can
+/// be driven; an author's list is one page, so both of them are disabled.
+fn pret_browse_body(query: &str) -> Vec<u8> {
+    let page: usize = pret_query(query, "page")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let author = pret_query(query, "author").is_some();
+    let with_pdf = pret_query(query, "include_pdf").is_some();
+    let sort = pret_query(query, "sort").unwrap_or_else(|| "issued_on_desc".to_owned());
+    let sorts = r#"[{"key":"issued_on_desc","label":"Recent releases"},{"key":"created_at_desc","label":"Recent acquisitions"}]"#;
+    let (indices, has_next): (Vec<usize>, bool) = if author {
+        (vec![2, 3, 4, 5], false)
+    } else {
+        match page {
+            1 => (vec![0, 1, 2, 3], true),
+            2 => (vec![4, 5, 6, 7], true),
+            _ => (vec![8, 9], false),
+        }
+    };
+    let mut ordered: Vec<usize> = if sort == "created_at_desc" {
+        indices.iter().rev().copied().collect()
+    } else {
+        indices
+    };
+    // Hidden unless asked for, which is what the reader's chip asks for.
+    if with_pdf && !ordered.is_empty() {
+        ordered.insert(0, PRET_PDF_BOOK);
+    }
+    format!(
+        r#"{{"publications":[{}],"page":{page},"total_pages":{},"has_previous":{},"has_next":{has_next},"sorts":{sorts}}}"#,
+        pret_publications(&ordered),
+        if author { 1 } else { 3 },
+        page > 1
+    )
+    .into_bytes()
+}
+
+fn pret_related_body() -> Vec<u8> {
+    format!(
+        r#"{{"publications":[{}]}}"#,
+        pret_publications(&[3, 4, 5, 6, 7])
+    )
+    .into_bytes()
+}
+
+/// What the libraries themselves say is out and waiting.
+///
+/// The first two loans are the same books the home server holds, matched on
+/// their titles, which is what puts a due date on a Library row. The third is a
+/// loan the home server has no file for. Then a hold at the back of one queue
+/// and one at the front of another.
+fn pret_shelf_body() -> Vec<u8> {
+    r#"[
+{"id":"shelf-montreal-loan","title":"Fixture return title","authors":["Ariane Michaud"],"catalog":"montreal","kind":"loan","since":"2026-08-14T19:06:05.328Z","until":"2026-09-11T19:06:05.328Z"},
+{"id":"shelf-banq-loan","title":"Fixture BAnQ title","authors":["Luc Blanvillain"],"catalog":"banq","kind":"loan","since":"2026-08-22T00:13:56.991Z","until":"2026-09-12T00:13:56.991Z"},
+{"id":"shelf-elsewhere","title":"Le Somnambule","authors":["Lars Kepler"],"catalog":"banq","kind":"loan","since":"2026-08-22T01:15:33.501Z","until":"2026-09-12T01:15:33.501Z"},
+{"id":"shelf-montreal-hold","title":"Mûre secrète et melon rafraîchissant","authors":["Sandra Verilli"],"catalog":"montreal","kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7},
+{"id":"shelf-banq-hold","title":"Typiquement Eliza","authors":["Sophie Lee"],"catalog":"banq","kind":"hold","since":"2026-08-24T01:04:22.672Z","until":"2026-12-17T02:26:59.919Z","position":1,"total":4}]"#
+        .as_bytes()
+        .to_vec()
+}
+
+/// One value out of a query string, undoing only the escaping the app applies.
+fn pret_query(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| pret_unescape(value))
+    })
+}
+
+fn pret_unescape(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn pret_fixture_fetch(
     url: &str,
     _offset: u32,
@@ -2219,6 +2482,7 @@ fn pret_fixture_fetch(
     let Some(path) = pret_fixture_path(url) else {
         return Err(kobo_protocol::TaskError::NotFound);
     };
+    let query = url.split_once('?').map_or("", |(_, query)| query);
     // Montréal is held signed out on purpose: it is the only way a script can
     // reach the advice the Settings screen gives for a catalogue nothing on the
     // Kobo can fix. `/search` answers a different question -- whether the last
@@ -2229,6 +2493,13 @@ fn pret_fixture_fetch(
         }
         "/jobs" => pret_jobs_body(),
         "/books" => pret_books_body(),
+        "/discovery" => pret_discovery_body(),
+        "/categories" => pret_categories_body(),
+        "/browse" => pret_browse_body(query),
+        "/shelf" => pret_shelf_body(),
+        _ if path.starts_with("/publications/") && path.ends_with("/related") => {
+            pret_related_body()
+        }
         _ => {
             let Some(id) = path.strip_prefix("/jobs/") else {
                 return Err(kobo_protocol::TaskError::NotFound);
@@ -2291,6 +2562,18 @@ fn pret_fixture_post(
     };
     let request_text = String::from_utf8_lossy(request_body).to_ascii_lowercase();
     let body: &[u8] = if path == "/search" {
+        if request_text.contains("guide") {
+            // A PDF-only title, reported only when the request asked for one.
+            let rows = if request_text.contains("\"include_pdf\":true") {
+                pret_publications(&[PRET_PDF_BOOK])
+            } else {
+                String::new()
+            };
+            return Ok(format!(
+                r#"{{"results":[{rows}],"catalogs":[{{"catalog":"montreal","state":"ready"}},{{"catalog":"banq","state":"ready"}}]}}"#
+            )
+            .into_bytes());
+        }
         if request_text.contains("nonsense") {
             br#"{"results":[],"catalogs":[{"catalog":"montreal","state":"ready"},{"catalog":"banq","state":"ready"}]}"#
         } else if request_text.contains("hamlet") {
@@ -2326,6 +2609,10 @@ fn pret_fixture_post(
         .and_then(|rest| rest.strip_suffix("/acknowledge"))
     {
         return pret_acknowledge(id);
+    } else if path == "/holds" {
+        // A hold is accepted exactly as a borrow is: asynchronous, started from
+        // `queued`, and never retried for the reader.
+        return pret_accept("fixture-hold-job");
     } else if path.starts_with("/books/") && path.ends_with("/return") {
         return pret_accept("fixture-return-job");
     } else {
@@ -3380,5 +3667,132 @@ mod tests {
             Err(kobo_protocol::TaskError::NotFound)
         );
         pret_state().acknowledged.clear();
+    }
+
+    fn pret_get(path: &str) -> String {
+        String::from_utf8(
+            pret_fixture_fetch(
+                &format!("https://home.lapal.me:3300/pret/v1{path}"),
+                0,
+                256 * 1024,
+                &[],
+            )
+            .expect("the fixture answers"),
+        )
+        .expect("utf-8")
+    }
+
+    #[test]
+    fn pret_fixture_serves_a_home_page_with_a_book_only_one_library_has_free() {
+        let home = pret_get("/discovery");
+        assert!(home.contains(r#""title":"Recent releases""#));
+        assert!(home.contains("En août, je lis québécois"));
+        // Out at Montréal, free at BAnQ: the case the merged availability is
+        // for. Both entries are there, and only one of them is available.
+        assert!(home.contains(r#""handle":"fixture-triplettes-montreal","catalog":"montreal","catalog_name":"Montréal","availability":"All copies out","is_available":false"#));
+        assert!(home.contains(r#""handle":"fixture-triplettes-banq","catalog":"banq","catalog_name":"BAnQ","availability":"Available now","is_available":true"#));
+        // And one book no library has free, which is the only thing a hold is
+        // offered for.
+        let henry = home
+            .split(r#"{"handle":"fixture-henry""#)
+            .nth(1)
+            .expect("the fixture carries a book that is out everywhere");
+        let henry = &henry[..henry.find("}]}").unwrap_or(henry.len())];
+        assert!(!henry.contains("is_available\":true"), "{henry}");
+
+        let categories = pret_get("/categories");
+        assert!(categories.contains(r#""key":"Y""#));
+        assert!(categories.contains(r#""catalogs":["montreal","banq"]"#));
+    }
+
+    #[test]
+    fn pret_fixture_pages_a_browse_and_says_where_it_ends() {
+        let first = pret_get("/browse?page=1&category=Y");
+        assert!(first.contains(r#""has_previous":false"#));
+        assert!(first.contains(r#""has_next":true"#));
+        assert!(first.contains(r#""total_pages":3"#));
+        let middle = pret_get("/browse?page=2&category=Y");
+        assert!(middle.contains(r#""has_previous":true"#));
+        assert!(middle.contains(r#""has_next":true"#));
+        let last = pret_get("/browse?page=3&category=Y");
+        assert!(last.contains(r#""has_previous":true"#));
+        assert!(last.contains(r#""has_next":false"#));
+
+        // An author's list is one page, so neither end leads anywhere.
+        let author = pret_get("/browse?page=1&author=Marilou%20Addison");
+        assert!(author.contains(r#""has_previous":false"#));
+        assert!(author.contains(r#""has_next":false"#));
+        assert!(author.contains("Mensonges"));
+        assert!(author.contains("Résolument moi !"));
+
+        // The order is a facet of the list, not a different list.
+        let recent = pret_get("/browse?page=1&category=Y&sort=created_at_desc");
+        assert!(
+            recent.contains(r#""publications":[{"handle":"fixture-volant""#),
+            "{recent}"
+        );
+    }
+
+    #[test]
+    fn pret_fixture_keeps_pdf_only_titles_out_until_they_are_asked_for() {
+        let plain = pret_get("/browse?page=1&category=Y");
+        assert!(!plain.contains("Le guide illustré du potager"));
+        let with_pdf = pret_get("/browse?page=1&category=Y&include_pdf=1");
+        assert!(with_pdf.contains("Le guide illustré du potager"));
+        assert!(with_pdf.contains(r#""pdf_only":true"#));
+        // And a book that has an EPUB is not a PDF book.
+        assert!(with_pdf.contains(r#""handle":"fixture-mensonges","title":"Mensonges","authors":["Marilou Addison"],"isbn":"9782898592102","pdf_only":false"#));
+        // The home page is a merged list, so it never carries one at all.
+        assert!(!pret_get("/discovery").contains("Le guide illustré du potager"));
+    }
+
+    #[test]
+    fn pret_fixture_shelf_carries_due_dates_and_a_place_in_the_queue() {
+        let shelf = pret_get("/shelf");
+        // Two loans the home server also holds, matched on their titles, and
+        // one it does not.
+        assert!(shelf.contains(r#""title":"Fixture return title","authors":["Ariane Michaud"],"catalog":"montreal","kind":"loan""#));
+        assert!(shelf.contains(r#""until":"2026-09-11T19:06:05.328Z""#));
+        assert!(shelf.contains(r#""title":"Le Somnambule""#));
+        // The back of one queue and the front of another.
+        assert!(shelf.contains(r#""kind":"hold","since":"2026-08-24T01:05:50.211Z","until":"2026-10-24T00:57:57.431Z","position":7,"total":7"#));
+        assert!(shelf.contains(r#""position":1,"total":4"#));
+
+        let related = pret_get("/publications/fixture-triplettes/related");
+        assert!(related.contains("Les mains sur le volant"));
+    }
+
+    #[test]
+    fn pret_fixture_accepts_a_hold_and_carries_it_to_a_settled_state() {
+        let accepted = pret_fixture_post(
+            "https://home.lapal.me:3300/pret/v1/holds",
+            br#"{"publication_handle":"fixture-henry-montreal","client_request_id":"kobo-hold-1"}"#,
+            "application/json",
+            None,
+            &[],
+            4096,
+        )
+        .expect("a hold is accepted");
+        let accepted = String::from_utf8(accepted).expect("utf-8");
+        assert!(accepted.contains(r#""kind":"hold""#));
+        assert!(accepted.contains(r#""state":"queued""#));
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(
+                pret_get("/jobs/fixture-hold-job")
+                    .split(r#""state":""#)
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .expect("a state")
+                    .to_owned(),
+            );
+        }
+        assert_eq!(seen, vec!["holding", "complete", "complete"]);
+        // A hold never fetches a file, so it never sends one to the reader.
+        assert!(!pret_get("/jobs/fixture-hold-job").contains("downloading"));
+        pret_state()
+            .polls
+            .retain(|(key, _)| key != "fixture-hold-job");
     }
 }

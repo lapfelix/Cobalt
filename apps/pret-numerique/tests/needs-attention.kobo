@@ -1,19 +1,24 @@
-# The three homes an exception can have. The fixture holds Montréal signed
-# out, one loan whose delivery failed, and one borrow the library never
-# confirmed.
+# The homes an exception can have. The fixture holds Montréal signed out, one
+# loan whose delivery failed, one borrow the library never confirmed, one hold
+# it never confirmed either, and one return it did not answer.
 clean
 tap Settings
 wait-for Connection
 wait-for Sign-in needed
 expect --auth montreal
 tap Library
-wait-for My loans
+wait-for My books
 wait-for Needs your attention
 expect Uncertain fixture title
 expect Check your library account
-expect Fixture unsent title
+expect Uncertain fixture hold
+expect BAnQ · Hold
+clean
+# A delivery failure belongs on its loan, so it is on BAnQ's shelf rather than
+# in the section above.
+tap BAnQ
+wait-for Fixture unsent title
 expect Not sent to your reader
-expect Return not confirmed
 clean
 tap Fixture unsent title
 wait-for Needs you
@@ -22,8 +27,11 @@ expect status 1
 expect Send to my reader again
 clean
 tap Send to my reader again
-wait-for My loans
+wait-for My books
 clean
 wait-for Sent to your reader
-expect-missing Not sent to your reader
+clean
+# And an unconfirmed return is on the loan it belongs to, at the other library.
+tap Montréal
+wait-for Return not confirmed
 clean

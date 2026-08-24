@@ -534,6 +534,7 @@ version = "0.2.6"
 dependencies = [
  "kobo-json",
  "kobo-sdk",
+ "kobo-text",
  "kobo-ui",
 ]
 

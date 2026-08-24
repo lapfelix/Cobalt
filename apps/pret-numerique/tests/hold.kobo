@@ -1,0 +1,21 @@
+# A book no library has free. The offer is a hold instead of a borrow, and
+# placing one is the same single tap as borrowing: choosing the library is the
+# decision, and the progress is drawn on the book.
+clean
+tap Qui va séduire Henry ?
+wait-for Book details
+expect Every copy is out at Montréal and BAnQ
+expect Place a hold
+expect puts you on its waiting list
+expect-missing Borrow & send
+clean
+tap Montréal
+wait-for Waiting to start
+expect Book details
+clean
+wait-for You are in line at Montréal
+expect Your holds are in Library
+clean
+tap Open Library
+wait-for My books
+expect Waiting for you

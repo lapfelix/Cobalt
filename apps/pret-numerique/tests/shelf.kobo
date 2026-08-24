@@ -1,0 +1,22 @@
+# The shelf, merged across both libraries: loans with the date they are due,
+# holds with a place in the queue and the dates around it, each labelled with
+# the library it came from.
+clean
+tap Library
+wait-for My books
+wait-for Due 11 September 2026
+expect On hold
+expect 1 at the front of the queue
+expect not on your home server
+clean
+tap Waiting for you
+wait-for 7th of 7 · 24 August to 24 October 2026
+expect 1st of 4 · 24 August to 17 December 2026
+expect BAnQ
+expect when one is ready
+expect from your library account
+expect-missing Cancel hold
+expect Page 1
+clean
+tap Back
+wait-for My books

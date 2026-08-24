@@ -2,6 +2,10 @@
 # offline answer to POST /jobs has to say plainly that nothing happened. The
 # search runs first, then the network is taken away before the tap that borrows.
 clean
+# Discover is the first screen now, and Search is on its own bar.
+tap Search
+wait-for Find a book
+clean
 tap Title, author, or ISBN
 type dune
 tap Search

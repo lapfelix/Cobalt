@@ -1,0 +1,25 @@
+# A book neither library has as anything but a PDF. It is not in a list until it
+# is asked for, and when it is, the row and the book both say PDF.
+clean
+tap Categories
+wait-for Browse by subject
+tap Children's, Teenage & Educational
+wait-for Recent acquisitions
+expect Show PDF
+expect-missing Le guide illustré du potager
+clean
+tap Show PDF
+wait-for Le guide illustré du potager
+expect PDF
+clean
+tap Le guide illustré du potager
+wait-for Book details
+expect PDF only, hard to read here
+expect Available now at Montréal
+clean
+tap Back
+wait-for Recent acquisitions
+tap Show PDF
+wait-for Recent releases
+expect-missing Le guide illustré du potager
+clean

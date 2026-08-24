@@ -2,22 +2,22 @@
 # followed there rather than on a list of jobs.
 clean
 tap Library
-wait-for My loans
+wait-for My books
 expect Both
 tap BAnQ
-expect My loans
+expect My books
 tap Fixture BAnQ title
 wait-for Return this book?
 expect BAnQ
 tap Keep loan
-wait-for My loans
+wait-for My books
 tap Montréal
-expect My loans
+expect My books
 tap Fixture return title
 wait-for Return this book?
 expect home server until
 tap Return loan
-wait-for My loans
+wait-for My books
 clean
 wait-for Montréal has it back
 clean

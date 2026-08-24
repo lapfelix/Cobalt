@@ -1,0 +1,31 @@
+# Tapping an author lists their other books across both libraries; the book's
+# own bar leads to its neighbours. Back walks the way it came, book by book.
+clean
+tap Mensonges
+wait-for Book details
+expect More by this author
+expect Marilou Addison
+clean
+tap Marilou Addison
+wait-for Books by Marilou Addison
+expect Résolument moi !
+expect Page 1
+clean
+tap Previous page
+expect Page 1
+tap Un dernier arrêt avant Noël
+wait-for Book details
+clean
+tap Back
+wait-for Books by Marilou Addison
+tap Back
+wait-for Book details
+tap Similar
+wait-for Like Mensonges
+expect Les mains sur le volant
+expect Page 1
+clean
+tap Back
+wait-for Book details
+tap Back
+wait-for Prêt numérique

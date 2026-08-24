@@ -2736,13 +2736,13 @@ fn is_keyboard_screen(screen: &Screen) -> bool {
 /// The key faces of the SDK's text keyboard composite, if this is one.
 ///
 /// A keyboard is intentionally built from ordinary grids, so it carries no
-/// protocol-only widget tag. Its four-row shape and the three invariant
+/// protocol-only widget tag. Its four-row shape and the four invariant
 /// utility labels distinguish it from calculators, games and choice grids.
 ///
 /// The faces come back rather than a yes or no because what the panel has to
 /// tell apart is not "is there a keyboard" but "are these the same keys".
 /// Typing leaves every face alone and moves only the field above them. Shift
-/// and the symbol layer replace all of them at once, and the two cases want
+/// and either layer key replace all of them at once, and the two cases want
 /// opposite waveforms.
 fn keyboard_keys(screen: &Screen) -> Option<Vec<&str>> {
     keyboard_keys_in(&screen.nodes)
@@ -2756,7 +2756,7 @@ fn keyboard_keys_in(nodes: &[Node]) -> Option<Vec<&str>> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    if grids.len() != 4 || grids[0].0 != 10 || grids[1].0 != 9 || grids[2].0 != 9 || grids[3].0 != 3
+    if grids.len() != 4 || grids[0].0 != 10 || grids[1].0 != 9 || grids[2].0 != 9 || grids[3].0 != 4
     {
         return None;
     }
@@ -2772,9 +2772,16 @@ fn keyboard_keys_in(nodes: &[Node]) -> Option<Vec<&str>> {
             .1
             .first()
             .is_some_and(|cell| matches!(cell.label.as_str(), "?123" | "abc"))
+        // The accent key, spelled the way the SDK spells it. Only one of the
+        // two layer keys ever offers the way back to the letters, so a face of
+        // "abc" here is the keyboard sitting on the accent layer.
         && grids[3]
             .1
             .get(1)
+            .is_some_and(|cell| matches!(cell.label.as_str(), "éàç" | "abc"))
+        && grids[3]
+            .1
+            .get(2)
             .is_some_and(|cell| cell.label.eq_ignore_ascii_case("space"));
     shaped.then(|| {
         grids
@@ -3243,11 +3250,13 @@ mod tests {
     fn only_the_sdk_keyboard_shape_is_recognised_as_one() {
         let keyboard = sdk_keyboard(&[]);
         let faces = super::keyboard_keys(&keyboard).expect("the SDK composite is a keyboard");
-        assert_eq!(faces.len(), 10 + 9 + 9 + 3);
+        assert_eq!(faces.len(), 10 + 9 + 9 + 4);
 
+        // Same four grids, same column counts, different faces. What rules it
+        // out has to be the labels, not the shape, or the check proves nothing.
         let mut calculator = keyboard.nodes.clone();
         let last = calculator.len() - 1;
-        calculator[last] = grid(4, 3, &["Clear", "0", "Equals"]);
+        calculator[last] = grid(4, 4, &["Clear", "0", "Equals", "Plus"]);
         assert!(
             super::keyboard_keys_in(&calculator).is_none(),
             "a grid of the same shape that is not a keyboard was taken for one"
@@ -3290,6 +3299,42 @@ mod tests {
         assert_eq!(
             super::keyboard_change(None, &typed),
             super::KeyboardChange::Other
+        );
+    }
+
+    /// The accent layer is a third set of faces, and it has to be told apart
+    /// from a keystroke the same way the digits are: `é` left over `q` reads as
+    /// a dirty panel, and the way in is as easy to get wrong as the way out.
+    #[test]
+    fn entering_and_leaving_the_accent_layer_both_relabel_the_whole_panel() {
+        let letters = sdk_keyboard(&["kb.r0c0"]);
+        let accents = sdk_keyboard(&["kb.r0c0", "kb.accents"]);
+        let back = sdk_keyboard(&["kb.r0c0", "kb.accents", "kb.accents"]);
+        let digits = sdk_keyboard(&["kb.r0c0", "kb.accents", "kb.layer"]);
+
+        assert!(
+            super::keyboard_keys(&accents).is_some(),
+            "the accent layer is still recognised as a keyboard"
+        );
+        for (from, to, what) in [
+            (&letters, &accents, "into the accents"),
+            (&accents, &back, "back to the letters"),
+            (&accents, &digits, "accents to digits"),
+        ] {
+            assert_eq!(
+                super::keyboard_change(Some(from), to),
+                super::KeyboardChange::Relabelled,
+                "{what} took the two-level waveform"
+            );
+        }
+        // And typing on the accent layer still does not, or every accented
+        // character would cost a full flashing update.
+        assert_eq!(
+            super::keyboard_change(
+                Some(&accents),
+                &sdk_keyboard(&["kb.r0c0", "kb.accents", "kb.r0c4"])
+            ),
+            super::KeyboardChange::Typed
         );
     }
 
